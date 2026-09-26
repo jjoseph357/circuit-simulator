@@ -7,6 +7,7 @@ pub use std::time::Instant;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_clock {
+    #[link(wasm_import_module = "env")]
     extern "C" {
         fn now_ms() -> f64;
     }
