@@ -1,0 +1,255 @@
+[
+  {
+    "id": "ohms_law",
+    "title": "Ohm's law: a battery and a resistor",
+    "description": "A 5 V source drives 1 kΩ. Ohm's law says the current is I = V / R = 5 mA.",
+    "netlist": "* Ohm's law\nV1 1 0 5\nR1 1 0 1k\n.end\n",
+    "expected_voltages": {
+      "1": 5.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "voltage_divider",
+    "title": "Voltage divider",
+    "description": "Two resistors in series split 12 V. The middle node sits at 12 · R2 / (R1 + R2) = 4 V.",
+    "netlist": "* Voltage divider\nV1 in 0 12\nR1 in out 8k\nR2 out 0 4k\n.end\n",
+    "expected_voltages": {
+      "in": 12.0,
+      "out": 4.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "vsource_two_resistors",
+    "title": "Voltage source with a series and a shunt resistor",
+    "description": "12 V across 3 Ω and 6 Ω in series. The voltage source adds its current as an extra unknown in the MNA system.",
+    "netlist": "* Voltage source and two resistors\nV1 1 0 12.0\nR1 1 2 3.0\nR2 2 0 6.0\n.end\n",
+    "expected_voltages": {
+      "1": 12.0,
+      "2": 8.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "current_source_network",
+    "title": "Current source into a resistor network",
+    "description": "A 3 A current source feeds four resistors. A good first system to write by hand: three nodes, three KCL equations.",
+    "netlist": "* Current source network\nI1 0 1 3.0\nR1 1 2 5.0\nR2 2 0 10.0\nR3 2 3 5.0\nR4 3 0 10.0\n.end\n",
+    "expected_voltages": {
+      "1": 33.0,
+      "2": 18.0,
+      "3": 12.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "parallel_branches",
+    "title": "Two parallel branches",
+    "description": "A 4 A source splits between two resistor branches. The branch with less resistance takes more current.",
+    "netlist": "* Parallel branches\nI1 0 1 4.0\nR1 1 2 4.0\nR2 2 0 8.0\nR3 1 3 2.0\nR4 3 0 6.0\n.end\n",
+    "expected_voltages": {
+      "1": 19.2,
+      "2": 12.8,
+      "3": 14.4,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "resistor_ladder",
+    "title": "Resistor ladder",
+    "description": "A 10 A source drives a three-rung ladder of 6 Ω and 12 Ω resistors. Each rung halves the voltage.",
+    "netlist": "* Resistor ladder\nI1 0 1 10.0\nR1 1 0 6.0\nR2 1 2 6.0\nR3 2 0 12.0\nR4 2 3 6.0\nR5 3 0 12.0\n.end\n",
+    "expected_voltages": {
+      "1": 41.25,
+      "2": 22.5,
+      "3": 15.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "wheatstone_bridge",
+    "title": "Wheatstone bridge",
+    "description": "Two dividers side by side with a 50 Ω resistor across the middle. When the bridge is unbalanced, current flows through it.",
+    "netlist": "* Wheatstone bridge\nV1 1 0 10.0\nR1 1 2 100.0\nR2 2 0 100.0\nR3 1 3 100.0\nR4 3 0 120.0\nR_bridge 2 3 50.0\n.end\n",
+    "expected_voltages": {
+      "1": 10.0,
+      "2": 5.147058823529412,
+      "3": 5.294117647058823,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "rc_charging",
+    "title": "RC charging",
+    "description": "A 5 V step charges 1 µF through 1 kΩ. The time constant τ = RC = 1 ms: after 1 ms the capacitor reaches 63 % of 5 V.",
+    "netlist": "* RC charging, tau = 1 ms\nV1 1 0 PULSE(0 5 0 1n 1n)\nR1 1 2 1k\nC1 2 0 1u\n.tran 10u 5m\n.end\n",
+    "expected_voltages": {
+      "1": 0.0,
+      "2": 0.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "rc_square_wave",
+    "title": "Square wave into an RC filter",
+    "description": "A 1 kHz square wave through 1 kΩ and 100 nF. The capacitor rounds off every edge.",
+    "netlist": "* Square wave into RC\nV1 1 0 PULSE(0 5 0 1n 1n 500u 1m)\nR1 1 2 1k\nC1 2 0 100n\n.tran 5u 3m\n.end\n",
+    "expected_voltages": {
+      "1": 0.0,
+      "2": 0.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "rlc_ringing",
+    "title": "Series RLC ringing",
+    "description": "A 1 V step into 10 Ω, 1 mH and 1 µF. The capacitor voltage overshoots and rings at about 5 kHz before settling.",
+    "netlist": "* Series RLC step response\nV1 1 0 PULSE(0 1 0 1n 1n)\nR1 1 2 10\nL1 2 3 1m\nC1 3 0 1u\n.tran 2u 1m\n.end\n",
+    "expected_voltages": {
+      "1": 0.0,
+      "2": 0.0,
+      "3": 0.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "rc_lowpass_bode",
+    "title": "RC low-pass filter (Bode plot)",
+    "description": "1 kΩ and 159 nF give a cutoff of about 1 kHz. Above it the output falls by 20 dB per decade.",
+    "netlist": "* RC low-pass, fc ~ 1 kHz\nV1 in 0 DC 0 AC 1\nR1 in out 1k\nC1 out 0 159n\n.ac dec 20 10 100k\n.end\n",
+    "expected_voltages": {
+      "in": 0.0,
+      "out": 0.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "led",
+    "title": "LED with a current-limiting resistor",
+    "description": "5 V drives an LED through 330 Ω. The LED only conducts above about 1.8 V, and the resistor sets the current.",
+    "netlist": "* LED and resistor\nV1 1 0 5\nR1 1 2 330\nD1 2 0 LED\n.model LED D(IS=1e-19 N=1.8)\n.end\n",
+    "expected_voltages": {
+      "2": 1.819788188,
+      "1": 5.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "diode_iv",
+    "title": "Diode I-V curve",
+    "description": "Sweeps the voltage across a silicon diode from 0 to 0.8 V. Almost no current flows until about 0.6 V, then it shoots up.",
+    "netlist": "* Diode characteristic\nV1 a 0 0\nD1 a 0 DSI\n.model DSI D(IS=1e-14 N=1)\n.dc V1 0 0.8 0.005\n.end\n",
+    "expected_voltages": {
+      "0": 0.0,
+      "a": 0.0
+    }
+  },
+  {
+    "id": "half_wave_rectifier",
+    "title": "Half-wave rectifier",
+    "description": "A 5 V sine wave through a diode into 1 kΩ. Only the positive half-cycles get through.",
+    "netlist": "* Half-wave rectifier\nV1 in 0 SIN(0 5 1k)\nD1 in out DR\nR1 out 0 1k\n.model DR D(IS=1e-14)\n.tran 10u 3m\n.end\n",
+    "expected_voltages": {
+      "in": 0.0,
+      "out": 0.0,
+      "0": 0.0
+    }
+  },
+  {
+    "id": "bjt_amplifier",
+    "title": "BJT common-emitter amplifier",
+    "description": "A transistor biased by a 47k/10k divider amplifies a small AC input. The AC sweep shows the gain and where it rolls off.",
+    "netlist": "* Common-emitter amplifier\nVCC vcc 0 12\nVS in 0 DC 0 AC 1m\nCIN in b 10u\nR1 vcc b 47k\nR2 b 0 10k\nRC vcc c 2.2k\nRE e 0 1k\nCE e 0 100u\nQ1 c b e QN\n.model QN NPN(IS=1e-15 BF=150)\n.ac dec 20 1 1meg\n.end\n",
+    "expected_voltages": {
+      "b": 2.033596142,
+      "e": 1.312422259,
+      "c": 9.131792399,
+      "in": 0.0,
+      "0": 0.0,
+      "vcc": 12.0
+    },
+    "layout": {
+      "VS": [
+        40,
+        320,
+        90
+      ],
+      "CIN": [
+        120,
+        260,
+        0
+      ],
+      "R1": [
+        200,
+        140,
+        90
+      ],
+      "R2": [
+        200,
+        340,
+        90
+      ],
+      "RC": [
+        360,
+        140,
+        90
+      ],
+      "Q1": [
+        360,
+        260,
+        0
+      ],
+      "RE": [
+        360,
+        360,
+        90
+      ],
+      "CE": [
+        460,
+        360,
+        90
+      ],
+      "VCC": [
+        580,
+        180,
+        90
+      ]
+    }
+  },
+  {
+    "id": "cmos_inverter",
+    "title": "CMOS inverter",
+    "description": "A PMOS pulls the output up and an NMOS pulls it down. Sweeping the input from 0 to 5 V shows the logic switch near 2.5 V.",
+    "netlist": "* CMOS inverter\nVDD vdd 0 5\nVIN in 0 0\nMP out in vdd PM W=20u L=1u\nMN out in 0 NM W=10u L=1u\n.model NM NMOS(VTO=0.8 KP=100u LAMBDA=0.01)\n.model PM PMOS(VTO=-0.8 KP=50u LAMBDA=0.01)\n.dc VIN 0 5 0.02\n.end\n",
+    "expected_voltages": {
+      "0": 0.0,
+      "out": 4.999999999,
+      "vdd": 5.0,
+      "in": 0.0
+    },
+    "layout": {
+      "VIN": [
+        160,
+        220,
+        90
+      ],
+      "MP": [
+        320,
+        140,
+        180,
+        true
+      ],
+      "MN": [
+        320,
+        260,
+        0
+      ],
+      "VDD": [
+        480,
+        160,
+        90
+      ]
+    }
+  }
+]

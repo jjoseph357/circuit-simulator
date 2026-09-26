@@ -1,0 +1,14 @@
+# Build outputs
+engine/target/
+frontend/node_modules/
+frontend/dist/
+
+# Locally built PyO3 engine (python circuit_simulator/build_engine.py)
+backend/_native/*.pyd
+backend/_native/*.so
+backend/_native/*.old
+
+# AI provider settings may contain API keys
+settings.json
+
+__pycache__/
