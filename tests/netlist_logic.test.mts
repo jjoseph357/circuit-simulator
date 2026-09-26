@@ -183,3 +183,32 @@ test('SPICE title line: the first line is a title unless it is a valid element',
   const r = simulate('My divider\nV1 1 0 10\nR1 1 2 1k\nR2 2 0 1k');
   assert.ok(r.success && Math.abs(r.node_voltages['2'] - 5) < 1e-9);
 });
+
+test('symbolic matrix: the symbols in every entry add up to the engine\'s G, C and b', async () => {
+  const { buildSymbolic } = await import('../frontend/symbolic.ts');
+  const extra = [
+    '* inductor and capacitor\nV1 1 0 AC 1\nR1 1 2 1k\nL3 2 3 1m\nC1 3 0 1u\n.ac dec 5 10 1k',
+    '* gmin node\nI1 0 1 1m\nR1 1 0 1k\nC1 1 2 1u\nC2 2 0 1u',
+  ];
+  for (const net of [...presets.map((p: any) => p.netlist), ...extra]) {
+    const r = simulate(net, 0);
+    if (!r.success || r.educational_views === false) continue;
+    const comps = autoLayout(parseNetlistElements(net));
+    const sys = buildSymbolic(r, comps);
+    const n = r.variable_names.length;
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        const terms = sys.Y.get(`${i},${j}`) ?? [];
+        const g = terms.filter((t) => !t.s).reduce((s, t) => s + t.value, 0);
+        const c = terms.filter((t) => t.s).reduce((s, t) => s + t.value, 0);
+        assert.ok(Math.abs(g - r.matrix_g[i][j]) < 1e-9 * Math.max(1, Math.abs(r.matrix_g[i][j])), `${net.split('\n')[0]} G[${i},${j}]`);
+        assert.ok(Math.abs(c - (r.matrix_c?.[i]?.[j] ?? 0)) < 1e-15 + 1e-9 * Math.abs(c), `${net.split('\n')[0]} C[${i},${j}]`);
+      }
+      const bsum = (sys.b.get(i) ?? []).reduce((s, t) => s + t.value, 0);
+      assert.ok(Math.abs(bsum - r.vector_b[i]) < 1e-9 * Math.max(1, Math.abs(r.vector_b[i])), `${net.split('\n')[0]} b[${i}]`);
+      for (const t of [...(sys.b.get(i) ?? [])]) assert.ok(t.sym.base, 'every term has a symbol');
+    }
+    // A resistor's entry is written with its own symbol, not a bare number.
+    for (const c of comps.filter((x) => x.type === 'Resistor')) assert.ok(sys.defs.some((d) => d.part === c.name && d.sym.base === 'g'), c.name);
+  }
+});

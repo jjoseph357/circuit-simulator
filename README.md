@@ -25,11 +25,13 @@ For UI development: `python circuit_simulator/backend/server.py` plus `cd circui
   power. Undo/redo, zoom, and “Tidy up” sit in the bottom-left corner.
 - **Netlist (right)**: the same circuit as editable SPICE text. Node names are coloured like their wires. The
   line under the cursor is explained in plain English, mistakes are flagged per line, and “Update schematic”
-  (Ctrl+Enter) applies edits while keeping the drawing where it can.
+  (Ctrl+Enter) applies edits while keeping the drawing where it can. “Syntax guide” opens an in-app SPICE reference (parts,
+  prefixes, sources, models, analyses, common mistakes).
 - **Run** (top right): the first Run shows results. After that they update live as the circuit changes.
 - **Below the schematic**: *Results* (node voltages, current/voltage/power per part, energy balance),
-  *Graphs* (over time, over frequency, source sweeps), *How it’s solved* (the matrix built one part at a
-  time, Gaussian elimination, KCL check, sparsity, Newton’s method), and *Tools* (value tuner, AI tutor and
+  *Graphs* (over time, over frequency, source sweeps), *How it’s solved* (the matrix (G + sC)·x = b built one part at a
+  time, each entry shown as its symbols, e.g. g₁ + g₂ + sC₁, then its numbers; Gaussian elimination vs sparse LU;
+  KCL check, sparsity, Newton’s method), and *Tools* (value tuner, AI tutor and
   designer).
 - **Settings** (gear): solver (step-by-step Gaussian, sparse LU, or faer), current dots, AI provider.
 

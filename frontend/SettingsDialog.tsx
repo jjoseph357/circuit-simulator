@@ -12,9 +12,9 @@ const PROVIDER_LABEL: Record<string, string> = {
 const KEY_FIELD: Record<string, string> = { openai: 'openai_api_key', anthropic: 'anthropic_api_key', gemini: 'gemini_api_key' };
 
 const SOLVERS: Array<{ id: SolverType; label: string; text: string }> = [
-  { id: 'gaussian', label: 'Step-by-step (Gaussian elimination)', text: 'Records every row operation so you can follow it in “How it’s solved”. Best for learning.' },
-  { id: 'sparse_lu', label: 'Sparse LU', text: 'Stores only the non-zero entries, like real simulators. Handles circuits with 100 000+ nodes.' },
-  { id: 'faer', label: 'faer (industrial sparse LU)', text: 'A production solver library. Runs on the local server; without it the sparse LU is used instead.' },
+  { id: 'gaussian', label: 'Step-by-step (Gaussian elimination)', text: 'The textbook method on the full grid, zeros included. Records every row operation so you can follow it in “How it’s solved → Solve it”. Best for learning and small circuits.' },
+  { id: 'sparse_lu', label: 'Sparse LU', text: 'The same elimination, but it stores only the non-zero entries and saves the result as G = L·U so it can be reused. This is what real simulators do; it handles 100 000+ nodes.' },
+  { id: 'faer', label: 'faer (industrial sparse LU)', text: 'A production sparse LU library. Runs on the local server; without it the sparse LU above is used instead.' },
 ];
 
 /** Solver, display and AI settings. API keys are stored by the local server, never sent back to the page. */
@@ -73,7 +73,7 @@ export function SettingsDialog({ onClose, solver, onSolver, showCurrent, onShowC
         <div className="space-y-6 px-5 py-5">
           <section className="space-y-2">
             <h3 className="text-sm font-semibold text-gray-900">Solver</h3>
-            <p className="text-sm text-gray-500">How the simulator solves G·x = b. All three give the same answer.</p>
+            <p className="text-sm text-gray-500">How the simulator solves G·x = b. All three give the same answer; “How it’s solved → Solve it” compares them.</p>
             {SOLVERS.map((s) => (
               <label key={s.id} className={`flex cursor-pointer gap-3 rounded-xl border p-3 ${solver === s.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`}>
                 <input type="radio" name="solver" className="mt-1 accent-blue-600" checked={solver === s.id} onChange={() => onSolver(s.id)} />

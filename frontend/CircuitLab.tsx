@@ -171,6 +171,13 @@ export function CircuitLab() {
     runSimulation(net);
   };
 
+  const changeSolver = (s: SolverType) => {
+    setSolver(s);
+    routing.current.solver = s;
+    if (s === 'faer') fetchEngineInfo().then((i) => { setServerInfo(i); routing.current.serverInfo = i; }).catch(() => setServerInfo(null)).finally(() => { if (hasRun) runSimulation(netlist); });
+    else if (hasRun) runSimulation(netlist);
+  };
+
   const fix = (d: CircuitDiagnostic) => { if (d.fix) loadNetlist(applyAutoFix(netlist, d.fix)); };
 
   // ---------------- Lessons & examples ----------------
@@ -343,7 +350,7 @@ export function CircuitLab() {
                       onApplyDirectives={(lines) => { setTimeIndex(null); commit(comps, lines); if (!hasRun) { setHasRun(true); runSimulation(componentsToNetlist(comps, lines, title)); } }}
                       timeIndex={timeIndex} onTimeIndexChange={setTimeIndex} />
                   )}
-                  {bottomTab === 'math' && <MathView result={shownResult} hasRun={hasRun} tab={mathTab} onTab={setMathTab} selectedName={selectedName} onInspect={setInspecting} />}
+                  {bottomTab === 'math' && <MathView result={shownResult} hasRun={hasRun} tab={mathTab} onTab={setMathTab} selectedName={selectedName} onInspect={setInspecting} comps={comps} solver={solver} onUseGaussian={() => changeSolver('gaussian')} />}
                   {bottomTab === 'tools' && <ToolsView netlist={netlist} result={shownResult} serverOnline={!!serverInfo} onApplyNetlist={(net, relayout) => loadNetlist(net, { relayout })} />}
                 </div>
               )}
@@ -362,7 +369,7 @@ export function CircuitLab() {
 
         {showSettings && (
           <SettingsDialog onClose={() => setShowSettings(false)} solver={solver}
-            onSolver={(s) => { setSolver(s); routing.current.solver = s; if (s === 'faer') fetchEngineInfo().then((i) => { setServerInfo(i); routing.current.serverInfo = i; }).catch(() => setServerInfo(null)).finally(() => { if (hasRun) runSimulation(netlist); }); else if (hasRun) runSimulation(netlist); }}
+            onSolver={changeSolver}
             showCurrent={showCurrent} onShowCurrent={setShowCurrent} serverOnline={!!serverInfo} />
         )}
         {showPicker && (

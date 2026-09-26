@@ -1,7 +1,8 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { explainLine, modelKinds, normalizeNode, validateNetlist, LineToken, GROUND_COLOR } from './netlist';
 import { useGlow } from './ui';
-import { Check, Undo2, AlertCircle, Info } from 'lucide-react';
+import { SpiceReference } from './SpiceReference';
+import { Check, Undo2, AlertCircle, Info, BookOpen } from 'lucide-react';
 
 const ROLE_STYLE: Record<LineToken['role'], React.CSSProperties> = {
   name: { color: '#111827', fontWeight: 700 },
@@ -34,6 +35,7 @@ export function NetlistPanel({ text, applied, onChange, onApply, onRevert, selec
   const taRef = useRef<HTMLTextAreaElement>(null);
   const hlRef = useRef<HTMLDivElement>(null);
   const [cursorLine, setCursorLine] = useState<number | null>(null);
+  const [showRef, setShowRef] = useState(false);
   const dirty = text !== applied;
   const glow = useGlow('netlist');
   const updateGlow = useGlow('netlist:update');
@@ -76,7 +78,10 @@ export function NetlistPanel({ text, applied, onChange, onApply, onRevert, selec
   return (
     <div className={`flex h-full flex-col bg-white${glow}`}>
       <div className="border-b border-gray-200 px-4 py-3">
-        <h2 className="text-sm font-semibold text-gray-900">Netlist <span className="ml-1 font-normal text-gray-400">SPICE</span></h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-gray-900">Netlist <span className="ml-1 font-normal text-gray-400">SPICE</span></h2>
+          <button className="btn btn-ghost btn-sm -mr-2" onClick={() => setShowRef(true)} title="How to write a SPICE netlist"><BookOpen className="h-3.5 w-3.5" /> Syntax guide</button>
+        </div>
         <p className="mt-0.5 text-xs text-gray-500">Your circuit as text: one line per part, <span className="font-mono">name&nbsp;node&nbsp;node&nbsp;value</span>.</p>
       </div>
 
@@ -124,18 +129,19 @@ export function NetlistPanel({ text, applied, onChange, onApply, onRevert, selec
         {problems.length > 0 && (shown === null || !problemLines.has(shown)) ? (
           <div className="flex gap-2 text-red-700">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <p><b>Line {problems[0].line}:</b> {problems[0].message}{problems.length > 1 ? ` (${problems.length - 1} more)` : ''}</p>
+            <p><b>Line {problems[0].line}:</b> {problems[0].message}{problems.length > 1 ? ` (${problems.length - 1} more)` : ''} <button className="underline" onClick={() => setShowRef(true)}>Syntax guide</button></p>
           </div>
         ) : shownInfo && (shownInfo.text || shownInfo.error) ? (
           <div className="space-y-1">
             <p className="font-medium text-gray-400">Line {shown! + 1}</p>
             {shownInfo.text && <p className="text-gray-800">{shownInfo.text}</p>}
-            {shownInfo.error && <p className="flex gap-1.5 text-red-700"><AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" />{shownInfo.error}</p>}
+            {shownInfo.error && <p className="flex gap-1.5 text-red-700"><AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" /><span>{shownInfo.error} <button className="underline" onMouseDown={(e) => e.preventDefault()} onClick={() => setShowRef(true)}>Syntax guide</button></span></p>}
           </div>
         ) : (
           <p className="flex gap-2 text-gray-500"><Info className="mt-0.5 h-4 w-4 shrink-0" />Click any line to see what it means.</p>
         )}
       </div>
+      {showRef && <SpiceReference onClose={() => setShowRef(false)} />}
     </div>
   );
 }
