@@ -134,13 +134,58 @@ export function PartBody({ type, rotation = 0, leadColors, polarity, active, ink
           <Line points={[-4, 24, 4, 24]} stroke={ink} strokeWidth={2.2} lineCap="round" />
         </Group>
       );
+    case 'ShortCircuit':
+      return (
+        <Group>
+          {lead([-PIN_OFFSET, 0, -14, 0], c1)}
+          {lead([14, 0, PIN_OFFSET, 0], c2)}
+          <Line points={[-14, 0, 14, 0]} stroke={ink} strokeWidth={BODY + 1} lineCap="round" />
+          <Circle x={-10} y={0} radius={3.5} fill={ink} />
+          <Circle x={10} y={0} radius={3.5} fill={ink} />
+        </Group>
+      );
+    case 'OpAmp':
+      return (
+        <Group>
+          {lead([16, 0, PIN_OFFSET, 0], c1)}
+          {lead([-PIN_OFFSET, 12, -16, 12], c3 ?? leadColors[2] ?? '#6b7280')}
+          {lead([-PIN_OFFSET, -12, -16, -12], c2)}
+          <Line points={[-16, -22, -16, 22, 16, 0]} closed fill="#ffffff" stroke={ink} strokeWidth={BODY} lineJoin="round" />
+          <Line points={[-12, -12, -6, -12]} stroke={ink} strokeWidth={2} />
+          <Line points={[-12, 12, -6, 12]} stroke={ink} strokeWidth={2} />
+          <Line points={[-9, 9, -9, 15]} stroke={ink} strokeWidth={2} />
+        </Group>
+      );
+    case 'VCVS':
+    case 'CCVS':
+      return (
+        <Group>
+          {lead([-PIN_OFFSET, 0, -18, 0], c1)}
+          {lead([18, 0, PIN_OFFSET, 0], c2)}
+          <Line points={[0, -18, 18, 0, 0, 18, -18, 0]} closed fill="#ffffff" stroke={ink} strokeWidth={BODY} lineJoin="round" />
+          <Line points={[-11, 0, -5, 0]} stroke={ink} strokeWidth={2} />
+          <Line points={[-8, -3, -8, 3]} stroke={ink} strokeWidth={2} />
+          <Line points={[5, 0, 11, 0]} stroke={ink} strokeWidth={2} />
+        </Group>
+      );
+    case 'VCCS':
+    case 'CCCS':
+      return (
+        <Group>
+          {lead([-PIN_OFFSET, 0, -18, 0], c1)}
+          {lead([18, 0, PIN_OFFSET, 0], c2)}
+          <Line points={[0, -18, 18, 0, 0, 18, -18, 0]} closed fill="#ffffff" stroke={ink} strokeWidth={BODY} lineJoin="round" />
+          <Line points={[-8, 0, 8, 0]} stroke={ink} strokeWidth={2} />
+          <Line points={[3, -5, 9, 0, 3, 5]} stroke={ink} strokeWidth={2} lineJoin="round" lineCap="round" />
+        </Group>
+      );
   }
 }
 
 /** Half-size of the grab area around a part's body, in its own frame. */
 export function bodyExtent(type: PartType): { w: number; h: number } {
   if (type === 'Ground') return { w: 18, h: 16 };
-  if (type === 'BJT' || type === 'MOSFET') return { w: 28, h: 28 };
+  if (type === 'BJT' || type === 'MOSFET' || type === 'OpAmp') return { w: 28, h: 28 };
   return { w: 26, h: 20 };
 }
 
@@ -158,6 +203,10 @@ export function PartIcon({ type, className = 'w-9 h-6' }: { type: PartType; clas
     case 'BJT': body = <><circle cx="21" cy="12" r="9" {...s} strokeWidth={1.2} /><path d="M6 12h11M17 7v10M17 10l6-5v-4M17 14l6 5v4" {...s} /></>; break;
     case 'MOSFET': body = <><path d="M6 12h10M16 6v12M20 5v14M20 8h4V1M20 16h4v7" {...s} /></>; break;
     case 'Ground': body = <path d="M20 2v10M11 12h18M14 16h12M17 20h6" {...s} />; break;
+    case 'ShortCircuit': body = <><path d="M2 12h36" {...s} strokeWidth={2.2} /><circle cx="12" cy="12" r="3" fill="currentColor" /><circle cx="28" cy="12" r="3" fill="currentColor" /></>; break;
+    case 'OpAmp': body = <><path d="M6 4v16l26-8z" {...s} /><path d="M11 9h4M11 15h4M13 13v4" {...s} /></>; break;
+    case 'VCVS': case 'CCVS': body = <><path d="M20 3l14 9-14 9-14-9z" {...s} /><path d="M13 12h4M15 10v4M23 12h4" {...s} /></>; break;
+    case 'VCCS': case 'CCCS': body = <><path d="M20 3l14 9-14 9-14-9z" {...s} /><path d="M14 12h12M22 9l4 3-4 3" {...s} /></>; break;
   }
   return <svg viewBox="0 0 40 24" className={className} aria-hidden="true">{body}</svg>;
 }

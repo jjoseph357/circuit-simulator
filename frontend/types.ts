@@ -2,7 +2,7 @@
 export interface VisualCircuitComponent {
   id: string;
   name: string;
-  type: 'Resistor' | 'CurrentSource' | 'VoltageSource' | 'Capacitor' | 'Inductor' | 'Diode' | 'BJT' | 'MOSFET' | 'Ground';
+  type: 'Resistor' | 'CurrentSource' | 'VoltageSource' | 'Capacitor' | 'Inductor' | 'Diode' | 'BJT' | 'MOSFET' | 'Ground' | 'OpAmp' | 'VCVS' | 'VCCS' | 'CCCS' | 'CCVS' | 'ShortCircuit';
   value: number;
   unit: string;
   node1: string;
@@ -14,8 +14,10 @@ export interface VisualCircuitComponent {
   mirror?: boolean;
   /** SPICE source spec for V/I when not plain DC, e.g. "PULSE(0 5 0 1n 1n 1m 2m)" or "DC 0 AC 1". */
   source?: string;
-  /** Third terminal of a transistor: BJT emitter / MOSFET source (node1 = C/D, node2 = B/G). */
+  /** Third terminal of a transistor or OpAmp/controlled source: node3. */
   node3?: string;
+  /** Fourth terminal of an OpAmp or controlled source: node4. */
+  node4?: string;
   /** Device line text after the terminal nodes: model name, MOSFET bulk node, W=/L=. */
   deviceArgs?: string;
   /** Polarity, from the device's .model card. */

@@ -3,7 +3,7 @@ import Konva from 'konva';
 import { Stage, Layer, Rect, Circle, Line, Text, Group, Shape, Label, Tag } from 'react-konva';
 import type { CircuitSimulationResult, VisualCircuitComponent } from './types';
 import {
-  autoLayout, cutWire, detachTerminal, deviceTerminalCurrents, formatEng, formatQuantity, freshNode, isDevice, mergeNodes,
+  autoLayout, cutWire, detachComponent, detachTerminal, deviceTerminalCurrents, formatEng, formatQuantity, freshNode, isDevice, mergeNodes,
   nextName, nodeColorMap, nodeLabelAnchors, nodesOf, parseEngValue, pinLabel, routeWires, sourceLabel, terminalKey,
   terminalsOf, topologySignature, dcValueOfSpec, ElementType, ModelKind, PartType, PART_NAME, Point, Terminal, UNIT, Wire,
   GROUND_COLOR,
@@ -36,10 +36,11 @@ const MAX_PARTICLE_SPEED = 80; // px/s at the reference current
 const PARTICLE_SPACING = 24;
 
 const BASIC_PARTS: PartType[] = ['Resistor', 'VoltageSource', 'CurrentSource', 'Capacitor', 'Ground'];
-const MORE_PARTS: PartType[] = ['Inductor', 'Diode', 'BJT', 'MOSFET'];
+const MORE_PARTS: PartType[] = ['Inductor', 'Diode', 'BJT', 'MOSFET', 'OpAmp', 'VCVS', 'VCCS', 'CCCS', 'CCVS', 'ShortCircuit'];
 const PART_LABEL: Record<PartType, string> = {
   Resistor: 'Resistor', VoltageSource: 'Voltage source', CurrentSource: 'Current source', Capacitor: 'Capacitor', Ground: 'Ground',
   Inductor: 'Inductor', Diode: 'Diode', BJT: 'BJT', MOSFET: 'MOSFET',
+  OpAmp: 'Op-Amp', VCVS: 'VCVS (E)', VCCS: 'VCCS (G)', CCCS: 'CCCS (F)', CCVS: 'CCVS (H)', ShortCircuit: 'Short (W)',
 };
 export const PART_HELP: Record<PartType, string> = {
   Resistor: 'Limits current. Ohm’s law: V = I · R.',
@@ -51,8 +52,18 @@ export const PART_HELP: Record<PartType, string> = {
   Diode: 'A one-way valve for current. Turns on at about 0.6–0.7 V.',
   BJT: 'A small base current controls a large collector current.',
   MOSFET: 'The gate voltage controls the drain current.',
+  OpAmp: 'Operational amplifier: high-gain differential amplifier with virtual short between + and − inputs.',
+  VCVS: 'Voltage-controlled voltage source: Vout = Gain · (Vctrl+ − Vctrl−).',
+  VCCS: 'Voltage-controlled current source: Iout = gm · (Vctrl+ − Vctrl−).',
+  CCCS: 'Current-controlled current source: Iout = Gain · Ictrl.',
+  CCVS: 'Current-controlled voltage source: Vout = r · Ictrl.',
+  ShortCircuit: 'Ideal zero-resistance jumper wire between two nodes.',
 };
-const DEFAULT_VALUE: Record<PartType, number> = { Resistor: 1000, CurrentSource: 0.001, VoltageSource: 5, Capacitor: 1e-6, Inductor: 1e-3, Diode: 0, BJT: 0, MOSFET: 0, Ground: 0 };
+const DEFAULT_VALUE: Record<PartType, number> = {
+  Resistor: 1000, CurrentSource: 0.001, VoltageSource: 5, Capacitor: 1e-6, Inductor: 1e-3,
+  Diode: 0, BJT: 0, MOSFET: 0, Ground: 0,
+  OpAmp: 100000, VCVS: 2, VCCS: 0.005, CCCS: 10, CCVS: 1000, ShortCircuit: 0,
+};
 const DEFAULT_ROTATION: Partial<Record<PartType, number>> = { VoltageSource: 90, CurrentSource: 270 };
 
 interface FlowPath { segs: Array<[number, number, number, number, number]>; length: number; speed: number }
@@ -257,13 +268,17 @@ export function CircuitCanvas({
     const taken = new Set<string>();
     const fresh = () => { const n = freshNode(components, taken); taken.add(n); return n; };
     const three = type === 'BJT' || type === 'MOSFET';
+    const isOpAmp = type === 'OpAmp';
+    const isControlled = type === 'VCVS' || type === 'VCCS' || type === 'CCCS' || type === 'CCVS';
     const kinds: Partial<Record<PartType, ModelKind>> = { Diode: 'd', BJT: 'npn', MOSFET: 'nmos' };
     const comp: VisualCircuitComponent = {
       id: `p_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       name: nextName(components, type), type, value: DEFAULT_VALUE[type], unit: UNIT[type],
-      node1: type === 'Ground' ? '0' : fresh(), node2: type === 'Ground' ? '0' : fresh(),
+      node1: type === 'Ground' ? '0' : fresh(),
+      node2: type === 'Ground' ? '0' : (isOpAmp ? '0' : fresh()),
       x: snap(at.x), y: snap(at.y), rotation: type === 'Ground' ? 0 : rotation,
-      ...(three ? { node3: fresh() } : {}),
+      ...(three || isOpAmp || isControlled ? { node3: fresh() } : {}),
+      ...(isOpAmp || isControlled ? { node4: fresh() } : {}),
       ...(kinds[type] ? { modelKind: kinds[type] } : {}),
     };
     commit(joinTouchingPins([...components, comp], comp.id));
@@ -279,7 +294,7 @@ export function CircuitCanvas({
   const arrange = () => {
     const laid = autoLayout(components.filter((c) => c.type !== 'Ground').map((c) => ({
       name: c.name, type: c.type as ElementType, value: c.value, node1: c.node1, node2: c.node2, source: c.source,
-      node3: c.node3, deviceArgs: c.deviceArgs, modelKind: c.modelKind,
+      node3: c.node3, node4: c.node4, deviceArgs: c.deviceArgs, modelKind: c.modelKind,
     })));
     commit(laid);
     setTimeout(() => fitToView(laid), 0);
@@ -299,6 +314,10 @@ export function CircuitCanvas({
         else if (selectedId) rotatePart(selectedId);
       }
       if ((e.key === 'f' || e.key === 'F') && selectedId) flipPart(selectedId);
+      if ((e.key === 'd' || e.key === 'D' || e.key === 'u' || e.key === 'U') && selectedId) {
+        commit(detachComponent(components, selectedId));
+        setNotice('Component disconnected from circuit.');
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedWire) { commit(cutWire(components, selectedWire)); setSelectedWire(null); }
         else if (selectedId) deletePart(selectedId);
@@ -341,6 +360,11 @@ export function CircuitCanvas({
   const onPinDown = (e: Konva.KonvaEventObject<MouseEvent>, t: Terminal) => {
     e.cancelBubble = true;
     if (placing) return;
+    if (e.evt.altKey) {
+      commit(detachTerminal(components, terminalKey(t)));
+      setNotice(`Disconnected pin ${t.pin} of ${t.compName}.`);
+      return;
+    }
     if (wiring?.mode === 'click') {
       if (terminalKey(t) !== terminalKey(wiring.from)) connect(wiring.from, t.node);
       setWiring(null);
@@ -686,6 +710,7 @@ export function CircuitCanvas({
           onFlip={selectedComp.node3 !== undefined ? () => flipPart(selectedComp.id) : undefined}
           onDelete={() => deletePart(selectedComp.id)}
           onDetach={(pin) => commit(detachTerminal(components, `${selectedComp.id}:${pin}`))}
+          onDisconnectAll={() => commit(detachComponent(components, selectedComp.id))}
           onClose={() => onSelect(null)}
           nodeColor={colorOf}
         />
@@ -774,14 +799,15 @@ function signalKind(spec?: string): SignalKind {
   return 'dc';
 }
 
-function PartInspector({ comp, result, onChange, onRotate, onFlip, onDelete, onDetach, onClose, nodeColor }: {
+function PartInspector({ comp, result, onChange, onRotate, onFlip, onDelete, onDetach, onDisconnectAll, onClose, nodeColor }: {
   comp: VisualCircuitComponent;
   result: CircuitSimulationResult | null;
   onChange: (patch: Partial<VisualCircuitComponent>) => void;
   onRotate: () => void;
   onFlip?: () => void;
   onDelete: () => void;
-  onDetach: (pin: 1 | 2 | 3) => void;
+  onDetach: (pin: 1 | 2 | 3 | 4) => void;
+  onDisconnectAll: () => void;
   onClose: () => void;
   nodeColor: (n: string) => string;
 }) {
@@ -826,11 +852,25 @@ function PartInspector({ comp, result, onChange, onRotate, onFlip, onDelete, onD
         </div>
         <button className="icon-btn" onClick={onRotate} title="Rotate (R)"><RotateCw className="h-4 w-4" /></button>
         {onFlip && <button className="icon-btn" onClick={onFlip} title="Flip left-right (F)"><FlipHorizontal2 className="h-4 w-4" /></button>}
+        <button className="icon-btn hover:!text-amber-600" onClick={onDisconnectAll} title="Disconnect all pins (D or Alt-click pin)"><Unplug className="h-4 w-4" /></button>
         <button className="icon-btn hover:!text-red-600" onClick={onDelete} title="Delete (Del)"><Trash2 className="h-4 w-4" /></button>
         <button className="icon-btn" onClick={onClose} title="Close (Esc)"><X className="h-4 w-4" /></button>
       </div>
 
       <div className="space-y-3 p-3">
+        {pins.length > 0 && comp.type !== 'Ground' && (
+          <div className="flex items-center justify-between rounded-lg border border-gray-100 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-600">
+            <span>{pins.length} pins connected</span>
+            <button
+              onClick={onDisconnectAll}
+              className="flex items-center gap-1 font-medium text-amber-700 hover:text-amber-900 transition-colors"
+              title="Disconnect all pins of this component (D)"
+            >
+              <Unplug className="h-3.5 w-3.5" /> Disconnect all
+            </button>
+          </div>
+        )}
+
         {hasValue && (
           <div>
             <label className="label">{isSource ? (kind === 'dc' ? 'Value' : 'Amplitude') : 'Value'}</label>
@@ -913,17 +953,26 @@ function PartInspector({ comp, result, onChange, onRotate, onFlip, onDelete, onD
               </div>
             )}
             <div>
-              <label className="label">Connections</label>
+              <div className="flex items-center justify-between">
+                <label className="label">Connections</label>
+                <span className="text-[10px] text-gray-400">Alt-click pin to unplug</span>
+              </div>
               <div className="mt-1 space-y-1">
                 {pins.map((t) => (
                   <div key={t.pin} className="flex items-center gap-2 text-xs">
-                    <span className="w-16 text-gray-500">{pinLabel(comp.type, t.pin)}</span>
+                    <span className="w-16 font-medium text-gray-500">{pinLabel(comp.type, t.pin)}</span>
                     <input className="input w-20 py-0.5 font-mono text-xs font-semibold" style={{ color: nodeColor(t.node) }}
                       defaultValue={t.node} key={`${comp.id}:${t.pin}:${t.node}`}
-                      onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== t.node) onChange({ [t.pin === 1 ? 'node1' : t.pin === 2 ? 'node2' : 'node3']: ['gnd', 'ground'].includes(v.toLowerCase()) ? '0' : v }); }}
+                      onBlur={(e) => {
+                        const v = e.target.value.trim();
+                        if (v && v !== t.node) {
+                          const field = t.pin === 1 ? 'node1' : t.pin === 2 ? 'node2' : t.pin === 3 ? 'node3' : 'node4';
+                          onChange({ [field]: ['gnd', 'ground'].includes(v.toLowerCase()) ? '0' : v });
+                        }
+                      }}
                       onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
                       title="Node name (0 = ground). Two pins with the same node name are connected." />
-                    <button className="icon-btn" onClick={() => onDetach(t.pin)} title="Disconnect this pin"><Unplug className="h-3.5 w-3.5" /></button>
+                    <button className="icon-btn hover:!text-amber-600" onClick={() => onDetach(t.pin)} title="Disconnect this pin"><Unplug className="h-3.5 w-3.5" /></button>
                   </div>
                 ))}
               </div>

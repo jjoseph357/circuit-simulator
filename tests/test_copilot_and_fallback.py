@@ -97,7 +97,7 @@ class TestPythonFallbackParity(unittest.TestCase):
     def test_all_presets_match_rust(self):
         # Presets with C, L, devices, waveforms or .tran/.ac/.dc need the Rust engine by design.
         resistive = [c for c in PRESET_CIRCUITS
-                     if not re.search(r'^\s*([CLDQM]\w*\s|\.(tran|ac|dc|model)\b)|\b(PULSE|SIN|PWL|AC)\b', c["netlist"], re.I | re.M)]
+                     if not re.search(r'^\s*([CLDQMEFGHOWKT]\w*\s|\.(tran|ac|dc|model)\b)|\b(PULSE|SIN|PWL|AC)\b', c["netlist"], re.I | re.M)]
         self.assertGreaterEqual(len(resistive), 5)
         for circuit in resistive:
             net = circuit["netlist"]
@@ -107,6 +107,12 @@ class TestPythonFallbackParity(unittest.TestCase):
             for node, v in rust["node_voltages"].items():
                 self.assertAlmostEqual(py["node_voltages"][node], v, places=9, msg=f"{circuit['id']} node {node}")
             self.assertEqual(set(py["branch_currents"]), set(rust["branch_currents"]), f"{circuit['id']}: element names differ")
+
+    def test_devices_needing_rust_engine_give_clear_error(self):
+        for net in ("O1 out 0 0 inv", "E1 2 0 1 0 2", "G1 2 0 1 0 0.01", "W1 1 2"):
+            res = simulate_netlist_pure_python(net)
+            self.assertFalse(res["success"])
+            self.assertIn("Rust engine", res["error_message"])
 
     def test_unsupported_element_is_an_error_not_a_voltage_source(self):
         res = simulate_netlist_pure_python("V1 1 0 5\nR1 1 2 1k\nJ1 2 0 1")

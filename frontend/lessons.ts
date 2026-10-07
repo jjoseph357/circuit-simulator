@@ -241,6 +241,43 @@ export const LESSONS: Lesson[] = [
       },
     ],
   },
+  {
+    id: 'opamp',
+    title: 'Operational Amplifiers and Virtual Ground',
+    goal: 'Understand how negative feedback forces differential inputs equal and sets closed-loop gain.',
+    preset: 'opamp_inverting',
+    steps: [
+      { id: 'run', title: 'Press Run', target: 'run', check: ran },
+      {
+        id: 'q1', title: 'Examine the inverting node',
+        quiz: {
+          question: 'In an inverting amplifier with negative feedback, what is the voltage at the inverting input (node inv)?',
+          options: ['-4 V', '0 V (Virtual Ground)', '2 V'], answer: 1,
+          explain: 'Because the non-inverting (+) input is grounded and open-loop gain is enormous, negative feedback drives the differential input (V+ - V-) to 0 V, creating a virtual ground.',
+        },
+      },
+      { id: 'results', title: 'Inspect the output voltage', detail: 'Notice V(out) is -4 V for an input of +2 V, giving an inverting gain of -2 (-RF / R1 = -20k / 10k).', target: 'tab:results', check: (s) => s.bottomTab === 'results' },
+      { id: 'math', title: 'Check the MNA stamp in the Math tab', detail: 'The OpAmp stamps an auxiliary row enforcing V+ - V- = 0 (ideal virtual short) and adds its output current Io.', target: 'tab:math', check: (s) => s.bottomTab === 'math' },
+    ],
+  },
+  {
+    id: 'dependent_sources',
+    title: 'Controlled Sources: VCVS and VCCS',
+    goal: 'See how dependent sources model active components and amplification stages.',
+    preset: 'vcvs_buffer',
+    steps: [
+      { id: 'run', title: 'Press Run', target: 'run', check: ran },
+      {
+        id: 'q1', title: 'Calculate VCVS output',
+        quiz: {
+          question: 'With V(in) = 4 V and VCVS gain E1 = 3, what is V(out)?',
+          options: ['1.33 V', '7 V', '12 V'], answer: 2,
+          explain: 'A voltage-controlled voltage source multiplies the differential control voltage by its gain: V(out) = 3 · 4 V = 12 V.',
+        },
+      },
+      { id: 'inspect', title: 'Check branch current', detail: 'The VCVS supplies all 12 mA into the 1 kΩ load resistor while drawing zero current from its control terminals.', target: 'tab:results', check: (s) => s.bottomTab === 'results' },
+    ],
+  },
 ];
 
 const PROGRESS_KEY = 'circuitlab.lessons.v1';

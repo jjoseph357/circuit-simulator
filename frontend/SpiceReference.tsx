@@ -70,10 +70,21 @@ R2 out 0 4k
             [<M>D</M>, 'Diode', <M>Dname anode cathode model</M>, <M>D1 a k DMOD</M>],
             [<M>Q</M>, 'BJT', <M>Qname collector base emitter model</M>, <M>Q1 c b e QN</M>],
             [<M>M</M>, 'MOSFET', <M>Mname drain gate source [bulk] model W= L=</M>, <M>M1 d g 0 NM W=10u L=1u</M>],
+            [<M>O</M>, 'Op-Amp', <M>Oname out [out_ref] in+ in- [gain]</M>, <M>O1 out 0 0 inv</M>],
+            [<M>E</M>, 'VCVS', <M>Ename out+ out- in+ in- gain</M>, <M>E1 out 0 in 0 3.0</M>],
+            [<M>G</M>, 'VCCS', <M>Gname out+ out- in+ in- gm</M>, <M>G1 out 0 in 0 2m</M>],
+            [<M>F</M>, 'CCCS', <M>Fname out+ out- [ctrl+ ctrl- | Vctrl] gain</M>, <M>F1 out 0 in 0 10</M>],
+            [<M>H</M>, 'CCVS', <M>Hname out+ out- [ctrl+ ctrl- | Vctrl] r</M>, <M>H1 out 0 in 0 1k</M>],
+            [<M>W</M>, 'Short circuit', <M>Wname n1 n2</M>, <M>W1 1 2</M>],
+            [<M>K</M>, 'Coupled inductors', <M>Kname L1 L2 k</M>, <M>K1 L1 L2 0.95</M>],
+            [<M>T</M>, 'Transformer', <M>Tname p+ p- s+ s- L1 L2 M</M>, <M>T1 1 0 2 0 10m 40m 18m</M>],
           ]} />
           <ul className="list-disc space-y-1 pl-5">
             <li><b>Voltage source</b>: the first node is +. <M>V1 in 0 5</M> holds <M>in</M> 5 V above ground.</li>
             <li><b>Current source</b>: current flows <i>through the source</i> from the first node to the second, so it comes out into the second node. <M>I1 0 1 2m</M> pushes 2 mA into node 1.</li>
+            <li><b>Op-Amp</b>: ideal operational amplifier with virtual short between <M>in+</M> and <M>in-</M>, or finite open-loop gain when a value is given.</li>
+            <li><b>Controlled sources</b>: <M>E</M> (VCVS) and <M>G</M> (VCCS) sense differential input voltage; <M>F</M> (CCCS) and <M>H</M> (CCVS) sense branch or source current.</li>
+            <li><b>Short circuit</b>: <M>W1 1 2</M> acts as an ideal zero-resistance jumper wire between nodes 1 and 2.</li>
             <li>A part’s current is reported flowing from its first node to its second.</li>
           </ul>
         </>

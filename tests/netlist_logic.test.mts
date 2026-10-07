@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parseEngValue, parseNetlistElements, autoLayout, componentsToNetlist, applyAutoFix, routeWires, terminalsOf, terminalKey,
   extractDirectives, extractTitle, dcValueOfSpec, sourceLabel, deviceTerminalCurrents, explainLine, validateNetlist,
-  mergeLayout, cutWire, mergeNodes, dropGroundIfNoSymbol, nodesOf,
+  mergeLayout, cutWire, mergeNodes, dropGroundIfNoSymbol, nodesOf, detachComponent,
 } from '../frontend/netlist.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -83,7 +83,8 @@ test('wire currents obey KCL at every pin of the wiring tree', () => {
       for (const t of terminalsOf(c)) {
         if (t.isGroundSymbol || t.node === '0') continue;
         const key = terminalKey(t);
-        const injected = dev[t.compName] ? -(dev[t.compName][t.pin - 1] ?? 0) : (t.pin === 1 ? -1 : 1) * (res.branch_currents[t.compName] ?? 0);
+        const factor = c.type === 'OpAmp' ? (t.pin === 1 ? -1 : 0) : (t.pin === 1 ? -1 : (t.pin === 2 ? 1 : 0));
+        const injected = dev[t.compName] ? -(dev[t.compName][t.pin - 1] ?? 0) : factor * (res.branch_currents[t.compName] ?? 0);
         const net = wires.filter((w) => w.ends[1] === key).reduce((s, w) => s + w.current, 0) - wires.filter((w) => w.ends[0] === key).reduce((s, w) => s + w.current, 0);
         assert.ok(Math.abs(injected + net) < 1e-9, `${p.id}: KCL at ${key} (node ${t.node}) off by ${injected + net}`);
       }
@@ -212,3 +213,17 @@ test('symbolic matrix: the symbols in every entry add up to the engine\'s G, C a
     for (const c of comps.filter((x) => x.type === 'Resistor')) assert.ok(sys.defs.some((d) => d.part === c.name && d.sym.base === 'g'), c.name);
   }
 });
+
+test('detachComponent assigns fresh unique nodes to all pins of a part', () => {
+  const comps = autoLayout(parseNetlistElements('* divider\nV1 1 0 12\nR1 1 2 4k\nR2 2 0 8k\n.end\n'));
+  const r1 = comps.find((c) => c.name === 'R1')!;
+  const originalNodes = [r1.node1, r1.node2];
+  const detached = detachComponent(comps, r1.id);
+  const r1After = detached.find((c) => c.name === 'R1')!;
+  assert.notEqual(r1After.node1, originalNodes[0]);
+  assert.notEqual(r1After.node2, originalNodes[1]);
+  assert.notEqual(r1After.node1, r1After.node2);
+  const v1After = detached.find((c) => c.name === 'V1')!;
+  assert.equal(v1After.node1, '1');
+});
+

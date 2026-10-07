@@ -1,6 +1,6 @@
 import type { AutoFix, VisualCircuitComponent } from './types';
 
-export type ElementType = 'Resistor' | 'CurrentSource' | 'VoltageSource' | 'Capacitor' | 'Inductor' | 'Diode' | 'BJT' | 'MOSFET';
+export type ElementType = 'Resistor' | 'CurrentSource' | 'VoltageSource' | 'Capacitor' | 'Inductor' | 'Diode' | 'BJT' | 'MOSFET' | 'OpAmp' | 'VCVS' | 'VCCS' | 'CCCS' | 'CCVS' | 'ShortCircuit';
 export type PartType = VisualCircuitComponent['type'];
 export type ModelKind = 'd' | 'npn' | 'pnp' | 'nmos' | 'pmos';
 export const DEVICE_TYPES: ReadonlyArray<PartType> = ['Diode', 'BJT', 'MOSFET'];
@@ -14,22 +14,33 @@ export interface ParsedElement {
   node2: string;
   /** V/I sources only: SPICE spec when not plain DC (PULSE/SIN/PWL/AC). */
   source?: string;
-  /** Transistors: emitter / source node. */
+  /** Transistors: emitter / source node. OpAmp: in+. */
   node3?: string;
+  /** OpAmp / controlled sources: in-. */
+  node4?: string;
   /** Devices: text after the terminal nodes (model name, bulk node, W=/L=). */
   deviceArgs?: string;
   modelKind?: ModelKind;
 }
 
-export const PREFIX: Record<ElementType, string> = { Resistor: 'R', CurrentSource: 'I', VoltageSource: 'V', Capacitor: 'C', Inductor: 'L', Diode: 'D', BJT: 'Q', MOSFET: 'M' };
-const TYPE_BY_LETTER: Record<string, ElementType> = { R: 'Resistor', I: 'CurrentSource', V: 'VoltageSource', C: 'Capacitor', L: 'Inductor', D: 'Diode', Q: 'BJT', M: 'MOSFET' };
+export const PREFIX: Record<ElementType, string> = {
+  Resistor: 'R', CurrentSource: 'I', VoltageSource: 'V', Capacitor: 'C', Inductor: 'L',
+  Diode: 'D', BJT: 'Q', MOSFET: 'M', OpAmp: 'O', VCVS: 'E', VCCS: 'G', CCCS: 'F', CCVS: 'H', ShortCircuit: 'W',
+};
+const TYPE_BY_LETTER: Record<string, ElementType> = {
+  R: 'Resistor', I: 'CurrentSource', V: 'VoltageSource', C: 'Capacitor', L: 'Inductor',
+  D: 'Diode', Q: 'BJT', M: 'MOSFET', O: 'OpAmp', E: 'VCVS', G: 'VCCS', F: 'CCCS', H: 'CCVS', W: 'ShortCircuit',
+};
 export const UNIT: Record<PartType, string> = {
-  Resistor: 'Ω', CurrentSource: 'A', VoltageSource: 'V', Capacitor: 'F', Inductor: 'H', Diode: '', BJT: '', MOSFET: '', Ground: '',
+  Resistor: 'Ω', CurrentSource: 'A', VoltageSource: 'V', Capacitor: 'F', Inductor: 'H',
+  Diode: '', BJT: '', MOSFET: '', Ground: '', OpAmp: '', VCVS: '', VCCS: 'S', CCCS: '', CCVS: 'Ω', ShortCircuit: '',
 };
 /** Everyday names, used everywhere a student reads about a part. */
 export const PART_NAME: Record<PartType, string> = {
   Resistor: 'resistor', CurrentSource: 'current source', VoltageSource: 'voltage source', Capacitor: 'capacitor',
   Inductor: 'inductor', Diode: 'diode', BJT: 'transistor (BJT)', MOSFET: 'transistor (MOSFET)', Ground: 'ground',
+  OpAmp: 'operational amplifier', VCVS: 'voltage-controlled voltage source', VCCS: 'voltage-controlled current source',
+  CCCS: 'current-controlled current source', CCVS: 'current-controlled voltage source', ShortCircuit: 'short circuit',
 };
 
 /** `.model NAME KIND(...)` cards in a netlist → lower-case name → device kind. */
@@ -201,6 +212,63 @@ export function parseNetlistElements(text: string): ParsedElement[] {
       });
       continue;
     }
+    const nameUp = tokens[0].toUpperCase();
+    if (letter === 'W' || nameUp.startsWith('SC')) {
+      if (tokens.length < 3) continue;
+      out.push({ name: tokens[0], type: 'ShortCircuit', value: 0, node1: normalizeNode(tokens[1]), node2: normalizeNode(tokens[2]) });
+      continue;
+    }
+    if (letter === 'O' || nameUp.startsWith('OP')) {
+      if (tokens.length >= 5) {
+        const gain = tokens[5] ? parseEngValue(tokens[5]) : null;
+        out.push({
+          name: tokens[0], type: 'OpAmp', value: gain ?? 100000,
+          node1: normalizeNode(tokens[1]), node2: normalizeNode(tokens[2]),
+          node3: normalizeNode(tokens[3]), node4: normalizeNode(tokens[4]),
+        });
+      } else if (tokens.length === 4) {
+        out.push({
+          name: tokens[0], type: 'OpAmp', value: 100000,
+          node1: normalizeNode(tokens[1]), node2: '0',
+          node3: normalizeNode(tokens[2]), node4: normalizeNode(tokens[3]),
+        });
+      }
+      continue;
+    }
+    if (letter === 'E' || letter === 'G') {
+      if (tokens.length < 6) continue;
+      const val = parseEngValue(tokens[5]);
+      if (val === null) continue;
+      out.push({
+        name: tokens[0], type: letter === 'E' ? 'VCVS' : 'VCCS', value: val,
+        node1: normalizeNode(tokens[1]), node2: normalizeNode(tokens[2]),
+        node3: normalizeNode(tokens[3]), node4: normalizeNode(tokens[4]),
+      });
+      continue;
+    }
+    if (letter === 'F' || letter === 'H') {
+      const type = letter === 'F' ? 'CCCS' : 'CCVS';
+      if (tokens.length >= 6) {
+        const val = parseEngValue(tokens[5]);
+        if (val === null) continue;
+        out.push({
+          name: tokens[0], type, value: val,
+          node1: normalizeNode(tokens[1]), node2: normalizeNode(tokens[2]),
+          node3: normalizeNode(tokens[3]), node4: normalizeNode(tokens[4]),
+        });
+        continue;
+      } else if (tokens.length >= 5) {
+        const val = parseEngValue(tokens[4]);
+        if (val === null) continue;
+        out.push({
+          name: tokens[0], type, value: val,
+          node1: normalizeNode(tokens[1]), node2: normalizeNode(tokens[2]),
+          node3: normalizeNode(tokens[3]),
+        });
+        continue;
+      }
+      continue;
+    }
     if (tokens.length < 4) continue;
     const type = TYPE_BY_LETTER[letter];
     if (!type) continue;
@@ -231,8 +299,8 @@ export function sortNodes(nodes: Iterable<string>): string[] {
   });
 }
 
-export const nodesOf = (c: Pick<VisualCircuitComponent, 'type' | 'node1' | 'node2' | 'node3'>) =>
-  c.type === 'Ground' ? ['0'] : [c.node1, c.node2, ...(c.node3 !== undefined ? [c.node3] : [])];
+export const nodesOf = (c: Pick<VisualCircuitComponent, 'type' | 'node1' | 'node2' | 'node3' | 'node4'>) =>
+  c.type === 'Ground' ? ['0'] : [c.node1, c.node2, ...(c.node3 !== undefined ? [c.node3] : []), ...(c.node4 !== undefined ? [c.node4] : [])];
 
 // ------------------------------- Line explainer -------------------------------
 
@@ -521,6 +589,7 @@ export function autoLayout(elements: ParsedElement[]): VisualCircuitComponent[] 
     const base = {
       id: `c_${stamp}_${idx}`, name: e.name, type: e.type, value: e.value, unit: UNIT[e.type], node1: e.node1, node2: e.node2,
       ...(e.source ? { source: e.source } : {}), ...(e.node3 !== undefined ? { node3: e.node3 } : {}),
+      ...(e.node4 !== undefined ? { node4: e.node4 } : {}),
       ...(e.deviceArgs ? { deviceArgs: e.deviceArgs } : {}), ...(e.modelKind ? { modelKind: e.modelKind } : {}),
     };
     const g1 = e.node1 === '0', g2 = e.node2 === '0';
@@ -528,7 +597,7 @@ export function autoLayout(elements: ParsedElement[]): VisualCircuitComponent[] 
 
     if (e.node3 !== undefined) {
       // Transistor: collector/drain up, base/gate left, emitter/source down; below its nodes' columns.
-      const cols = [e.node1, e.node2, e.node3].filter((n) => n !== '0').map((n) => col.get(n)!);
+      const cols = [e.node1, e.node2, e.node3, ...(e.node4 !== undefined ? [e.node4] : [])].filter((n) => n !== '0').map((n) => col.get(n)!);
       let x = X0 + (cols.length ? Math.round(((Math.max(...cols) + Math.min(...cols)) / 2) * 2) / 2 : 0) * COL + COL / 2;
       while (usedDeviceX.has(x)) x += COL / 2;
       usedDeviceX.add(x);
@@ -581,17 +650,17 @@ export function mergeLayout(old: VisualCircuitComponent[], elements: ParsedEleme
     const c = byName.get(e.name.toUpperCase())!;
     out.push({
       ...c, name: e.name, type: e.type, value: e.value, unit: UNIT[e.type], node1: e.node1, node2: e.node2,
-      source: e.source, node3: e.node3, deviceArgs: e.deviceArgs, modelKind: e.modelKind,
+      source: e.source, node3: e.node3, node4: e.node4, deviceArgs: e.deviceArgs, modelKind: e.modelKind,
     });
   }
-  const usesGround = elements.some((e) => [e.node1, e.node2, e.node3].includes('0'));
+  const usesGround = elements.some((e) => [e.node1, e.node2, e.node3, e.node4].includes('0'));
   if (usesGround) out.push(...old.filter((c) => c.type === 'Ground'));
   const xs = old.map((c) => c.x), ys = old.map((c) => c.y);
   let freeX = (xs.length ? Math.max(...xs) : 0) + 120;
   const top = ys.length ? Math.min(...ys) : 0;
   elements.forEach((e, i) => {
     if (byName.has(e.name.toUpperCase())) return;
-    const anchor = out.flatMap(terminalsOf).find((t) => !t.isGroundSymbol && t.node !== '0' && [e.node1, e.node2, e.node3].includes(t.node));
+    const anchor = out.flatMap(terminalsOf).find((t) => !t.isGroundSymbol && t.node !== '0' && [e.node1, e.node2, e.node3, e.node4].includes(t.node));
     const vertical = e.node3 === undefined && (e.node1 === '0' || e.node2 === '0');
     let x = anchor ? anchor.pos.x + 60 : freeX, y = anchor ? anchor.pos.y + 60 : top;
     x = Math.round(x / 20) * 20; y = Math.round(y / 20) * 20;
@@ -601,6 +670,7 @@ export function mergeLayout(old: VisualCircuitComponent[], elements: ParsedEleme
     out.push({
       id: `c_${Date.now()}_${i}`, name: e.name, type: e.type, value: e.value, unit: UNIT[e.type], node1: e.node1, node2: e.node2, x, y, rotation,
       ...(e.source ? { source: e.source } : {}), ...(e.node3 !== undefined ? { node3: e.node3 } : {}),
+      ...(e.node4 !== undefined ? { node4: e.node4 } : {}),
       ...(e.deviceArgs ? { deviceArgs: e.deviceArgs } : {}), ...(e.modelKind ? { modelKind: e.modelKind } : {}),
     });
     if (vertical) out.push({ id: `g_${Date.now()}_${i}`, name: `GND_${e.name}`, type: 'Ground', value: 0, unit: '', node1: '0', node2: '0', x, y: y + 80, rotation: 0 });
@@ -617,6 +687,7 @@ export function dropGroundIfNoSymbol(comps: VisualCircuitComponent[]): VisualCir
     node1: c.node1 === '0' ? fresh : c.node1,
     node2: c.node2 === '0' ? fresh : c.node2,
     ...(c.node3 !== undefined ? { node3: c.node3 === '0' ? fresh : c.node3 } : {}),
+    ...(c.node4 !== undefined ? { node4: c.node4 === '0' ? fresh : c.node4 } : {}),
   }));
 }
 
@@ -653,8 +724,26 @@ export function componentsToNetlist(comps: VisualCircuitComponent[], directives:
     .map((m) => `.model ${m} ${m.slice(8).toUpperCase()}`);
   const valueText = (c: VisualCircuitComponent) =>
     c.source && (c.type === 'VoltageSource' || c.type === 'CurrentSource') ? c.source : formatEng(c.value, 12);
+  const formatComponentLine = (c: VisualCircuitComponent): string => {
+    if (isDevice(c.type)) return deviceLine(c);
+    if (c.type === 'ShortCircuit') return `${c.name} ${c.node1} ${c.node2}`;
+    if (c.type === 'OpAmp') {
+      const outMinus = c.node2 ?? '0';
+      const inPlus = c.node3 ?? '0';
+      const inMinus = c.node4 ?? '0';
+      const gainText = c.value && isFinite(c.value) && c.value !== 100000 ? ` ${formatEng(c.value, 12)}` : '';
+      return `${c.name} ${c.node1} ${outMinus} ${inPlus} ${inMinus}${gainText}`;
+    }
+    if (c.type === 'VCVS' || c.type === 'VCCS' || c.type === 'CCCS' || c.type === 'CCVS') {
+      const outMinus = c.node2 ?? '0';
+      const ctrlPlus = c.node3 ?? '0';
+      const ctrlMinus = c.node4 ?? '0';
+      return `${c.name} ${c.node1} ${outMinus} ${ctrlPlus} ${ctrlMinus} ${valueText(c)}`;
+    }
+    return `${c.name} ${c.node1} ${c.node2} ${valueText(c)}`;
+  };
   const lines = [`* ${title}`];
-  for (const c of active) lines.push(isDevice(c.type) ? deviceLine(c) : `${c.name} ${c.node1} ${c.node2} ${valueText(c)}`);
+  for (const c of active) lines.push(formatComponentLine(c));
   return [...lines, ...directives, ...defaults, '.end'].join('\n') + '\n';
 }
 
@@ -700,8 +789,9 @@ export const PIN_OFFSET = 40;
 export interface Terminal {
   compId: string;
   compName: string;
-  /** 1, 2 (two-terminal) or 1 = C/D, 2 = B/G, 3 = E/S for transistors. */
-  pin: 1 | 2 | 3;
+  compType: PartType;
+  /** 1, 2 (two-terminal), 1..3 for transistors/OpAmp, or 1..4 for controlled sources. */
+  pin: 1 | 2 | 3 | 4;
   node: string;
   pos: Point;
   /** Unit vector pointing away from the component body. */
@@ -711,38 +801,70 @@ export interface Terminal {
 
 export const terminalKey = (t: Pick<Terminal, 'compId' | 'pin'>) => `${t.compId}:${t.pin}`;
 
-/** Short terminal names students see on hover: +/−, anode/cathode, C/B/E, D/G/S. */
-export function pinLabel(type: PartType, pin: 1 | 2 | 3): string {
+/** Short terminal names students see on hover: +/−, anode/cathode, C/B/E, D/G/S, out/in−/in+. */
+export function pinLabel(type: PartType, pin: 1 | 2 | 3 | 4): string {
   switch (type) {
     case 'VoltageSource': return pin === 1 ? '+' : '−';
     case 'CurrentSource': return pin === 1 ? 'from' : 'to';
     case 'Diode': return pin === 1 ? 'anode' : 'cathode';
-    case 'BJT': return ['collector', 'base', 'emitter'][pin - 1];
-    case 'MOSFET': return ['drain', 'gate', 'source'][pin - 1];
+    case 'BJT': return ['collector', 'base', 'emitter'][pin - 1] ?? `pin ${pin}`;
+    case 'MOSFET': return ['drain', 'gate', 'source'][pin - 1] ?? `pin ${pin}`;
     case 'Ground': return 'ground';
+    case 'OpAmp': return ['out', 'in−', 'in+'][pin - 1] ?? `pin ${pin}`;
+    case 'VCVS':
+    case 'VCCS':
+    case 'CCCS':
+    case 'CCVS': return ['out+', 'out−', 'ctrl+', 'ctrl−'][pin - 1] ?? `pin ${pin}`;
+    case 'ShortCircuit': return pin === 1 ? 'pin 1' : 'pin 2';
     default: return `pin ${pin}`;
   }
 }
 
 export function terminalsOf(c: VisualCircuitComponent): Terminal[] {
   if (c.type === 'Ground') {
-    return [{ compId: c.id, compName: c.name, pin: 1, node: '0', pos: { x: c.x, y: c.y }, out: { x: 0, y: -1 }, isGroundSymbol: true }];
+    return [{ compId: c.id, compName: c.name, compType: c.type, pin: 1, node: '0', pos: { x: c.x, y: c.y }, out: { x: 0, y: -1 }, isGroundSymbol: true }];
   }
   const r = ((c.rotation ?? 0) * Math.PI) / 180;
   const dx = Math.round(Math.cos(r) * 1e6) / 1e6, dy = Math.round(Math.sin(r) * 1e6) / 1e6;
+  const m = c.mirror ? -1 : 1;
+  const rot = (lx: number, ly: number) => ({ x: m * lx * dx - ly * dy, y: m * lx * dy + ly * dx });
+  const pin = (p: 1 | 2 | 3 | 4, node: string, lx: number, ly: number) => {
+    const o = rot(lx, ly);
+    return { compId: c.id, compName: c.name, compType: c.type, pin: p, node, pos: { x: c.x + o.x, y: c.y + o.y }, out: { x: Math.sign(Math.round(o.x)), y: Math.sign(Math.round(o.y)) }, isGroundSymbol: false };
+  };
+
+  if (c.type === 'OpAmp') {
+    const inMinus = c.node4 ?? c.node2;
+    const inPlus = c.node3 ?? c.node1;
+    return [
+      pin(1, c.node1, PIN_OFFSET, 0),
+      pin(2, inMinus, -PIN_OFFSET, -12),
+      pin(3, inPlus, -PIN_OFFSET, 12),
+    ];
+  }
+
+  if (c.type === 'VCVS' || c.type === 'VCCS' || c.type === 'CCCS' || c.type === 'CCVS') {
+    if (c.node3 !== undefined || c.node4 !== undefined) {
+      return [
+        pin(1, c.node1, -PIN_OFFSET, 0),
+        pin(2, c.node2, PIN_OFFSET, 0),
+        pin(3, c.node3 ?? c.node1, 0, -PIN_OFFSET),
+        pin(4, c.node4 ?? c.node2, 0, PIN_OFFSET),
+      ];
+    }
+    return [
+      pin(1, c.node1, -PIN_OFFSET, 0),
+      pin(2, c.node2, PIN_OFFSET, 0),
+    ];
+  }
+
   if (c.node3 !== undefined) {
     // Local frame: C/D at (0,−40) up, B/G at (−40,0) left, E/S at (0,40) down; rotated with the part.
-    const m = c.mirror ? -1 : 1;
-    const rot = (lx: number, ly: number) => ({ x: m * lx * dx - ly * dy, y: m * lx * dy + ly * dx });
-    const pin = (p: 1 | 2 | 3, node: string, lx: number, ly: number) => {
-      const o = rot(lx, ly);
-      return { compId: c.id, compName: c.name, pin: p, node, pos: { x: c.x + o.x, y: c.y + o.y }, out: { x: Math.sign(Math.round(o.x)), y: Math.sign(Math.round(o.y)) }, isGroundSymbol: false };
-    };
     return [pin(1, c.node1, 0, -PIN_OFFSET), pin(2, c.node2, -PIN_OFFSET, 0), pin(3, c.node3, 0, PIN_OFFSET)];
   }
   return [
-    { compId: c.id, compName: c.name, pin: 1, node: c.node1, pos: { x: c.x - PIN_OFFSET * dx, y: c.y - PIN_OFFSET * dy }, out: { x: -dx, y: -dy }, isGroundSymbol: false },
-    { compId: c.id, compName: c.name, pin: 2, node: c.node2, pos: { x: c.x + PIN_OFFSET * dx, y: c.y + PIN_OFFSET * dy }, out: { x: dx, y: dy }, isGroundSymbol: false },
+    { compId: c.id, compName: c.name, compType: c.type, pin: 1, node: c.node1, pos: { x: c.x - PIN_OFFSET * dx, y: c.y - PIN_OFFSET * dy }, out: { x: -dx, y: -dy }, isGroundSymbol: false },
+    { compId: c.id, compName: c.name, compType: c.type, pin: 2, node: c.node2, pos: { x: c.x + PIN_OFFSET * dx, y: c.y + PIN_OFFSET * dy }, out: { x: dx, y: dy }, isGroundSymbol: false },
   ];
 }
 
@@ -804,7 +926,10 @@ function injection(t: Terminal, currents: Record<string, number> | undefined, de
   if (dev) return -(dev[t.pin - 1] ?? 0); // current into the device leaves the wiring
   if (!currents) return 0;
   const i = currents[t.compName] ?? 0;
-  return t.pin === 1 ? -i : i;
+  if (t.compType === 'OpAmp') return t.pin === 1 ? -i : 0;
+  if (t.pin === 1) return -i;
+  if (t.pin === 2) return i;
+  return 0;
 }
 
 const manhattan = (a: Point, b: Point) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
@@ -914,8 +1039,8 @@ export function nodeColorMap(nodes: Iterable<string>): Map<string, string> {
 }
 
 /** Order-insensitive fingerprint of which elements connect which nodes (values excluded). */
-export function topologySignature(comps: Array<Pick<VisualCircuitComponent, 'name' | 'node1' | 'node2' | 'type' | 'node3'>>): string {
-  return comps.filter((c) => c.type !== 'Ground').map((c) => `${c.name}:${c.node1}-${c.node2}${c.node3 !== undefined ? `-${c.node3}` : ''}`).sort().join('|');
+export function topologySignature(comps: Array<Pick<VisualCircuitComponent, 'name' | 'node1' | 'node2' | 'type' | 'node3' | 'node4'>>): string {
+  return comps.filter((c) => c.type !== 'Ground').map((c) => `${c.name}:${c.node1}-${c.node2}${c.node3 !== undefined ? `-${c.node3}` : ''}${c.node4 !== undefined ? `-${c.node4}` : ''}`).sort().join('|');
 }
 
 /** Current into each device terminal (pin order), from device operating points. */
@@ -937,6 +1062,7 @@ export function mergeNodes(comps: VisualCircuitComponent[], a: string, b: string
     node1: c.node1 === drop ? keep : c.node1,
     node2: c.node2 === drop ? keep : c.node2,
     ...(c.node3 !== undefined ? { node3: c.node3 === drop ? keep : c.node3 } : {}),
+    ...(c.node4 !== undefined ? { node4: c.node4 === drop ? keep : c.node4 } : {}),
   });
 }
 
@@ -947,8 +1073,31 @@ export function detachTerminal(comps: VisualCircuitComponent[], key: string): Vi
   if (!comp) return comps;
   if (comp.type === 'Ground') return comps.filter((c) => c.id !== compId);
   const fresh = freshNode(comps);
-  const field = pinText === '1' ? 'node1' : pinText === '2' ? 'node2' : 'node3';
+  const field = pinText === '1' ? 'node1' : pinText === '2' ? 'node2' : pinText === '3' ? 'node3' : 'node4';
   return comps.map((c) => (c.id === compId ? { ...c, [field]: fresh } : c));
+}
+
+/** Disconnects all pins of a component by assigning them fresh unused node names. Ground symbols are removed. */
+export function detachComponent(comps: VisualCircuitComponent[], compId: string): VisualCircuitComponent[] {
+  const comp = comps.find((c) => c.id === compId);
+  if (!comp) return comps;
+  if (comp.type === 'Ground') return comps.filter((c) => c.id !== compId);
+  const taken = new Set<string>();
+  const fresh = () => {
+    const n = freshNode(comps, taken);
+    taken.add(n);
+    return n;
+  };
+  return comps.map((c) => {
+    if (c.id !== compId) return c;
+    return {
+      ...c,
+      node1: fresh(),
+      node2: c.type === 'OpAmp' ? '0' : fresh(),
+      ...(c.node3 !== undefined ? { node3: fresh() } : {}),
+      ...(c.node4 !== undefined ? { node4: fresh() } : {}),
+    };
+  });
 }
 
 /**
@@ -981,7 +1130,7 @@ export function cutWire(comps: VisualCircuitComponent[], wire: Wire): VisualCirc
   const fresh = freshNode(comps);
   for (const key of moving) {
     const [compId, pinText] = key.split(':');
-    const field = pinText === '1' ? 'node1' : pinText === '2' ? 'node2' : 'node3';
+    const field = pinText === '1' ? 'node1' : pinText === '2' ? 'node2' : pinText === '3' ? 'node3' : 'node4';
     out = out.map((c) => (c.id === compId ? { ...c, [field]: fresh } : c));
   }
   return out;

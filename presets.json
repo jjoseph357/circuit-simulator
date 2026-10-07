@@ -251,5 +251,63 @@
         90
       ]
     }
+  },
+  {
+    "id": "opamp_inverting",
+    "title": "Inverting Op-Amp amplifier",
+    "description": "An ideal operational amplifier with negative feedback. With R1 = 10 kΩ and RF = 20 kΩ, the closed-loop gain is -RF / R1 = -2, producing V(out) = -4 V from a 2 V input while keeping the inverting node at a virtual ground.",
+    "netlist": "* Inverting Op-Amp amplifier (Gain = -2)\nV1 in 0 2\nR1 in inv 10k\nRF inv out 20k\nO1 out 0 0 inv\n.end\n",
+    "expected_voltages": {
+      "0": 0.0,
+      "in": 2.0,
+      "inv": 0.0,
+      "out": -4.0
+    }
+  },
+  {
+    "id": "opamp_non_inverting",
+    "title": "Non-inverting Op-Amp amplifier",
+    "description": "A non-inverting operational amplifier. With R1 = 10 kΩ to ground and RF = 20 kΩ from output to the inverting input, the gain is 1 + RF / R1 = 3, yielding V(out) = 6 V from a 2 V input.",
+    "netlist": "* Non-inverting Op-Amp amplifier (Gain = +3)\nV1 in 0 2\nR1 inv 0 10k\nRF out inv 20k\nO1 out 0 in inv\n.end\n",
+    "expected_voltages": {
+      "0": 0.0,
+      "in": 2.0,
+      "inv": 2.0,
+      "out": 6.0
+    }
+  },
+  {
+    "id": "vcvs_buffer",
+    "title": "Voltage-controlled voltage source (VCVS)",
+    "description": "A VCVS (SPICE E element) amplifying an input voltage with Gain = 3 into a load resistor.",
+    "netlist": "* VCVS amplifier (Gain = 3)\nV1 in 0 4\nE1 out 0 in 0 3.0\nRL out 0 1k\n.end\n",
+    "expected_voltages": {
+      "0": 0.0,
+      "in": 4.0,
+      "out": 12.0
+    }
+  },
+  {
+    "id": "vccs_transconductance",
+    "title": "Voltage-controlled current source (VCCS)",
+    "description": "A VCCS (SPICE G element) with transconductance gm = 2 mS converting 5 V into a 10 mA current through load RL, producing 10 V.",
+    "netlist": "* VCCS transconductance stage (gm = 2 mS)\nV1 in 0 5\nG1 0 out in 0 2m\nRL out 0 1k\n.end\n",
+    "expected_voltages": {
+      "0": 0.0,
+      "in": 5.0,
+      "out": 10.0
+    }
+  },
+  {
+    "id": "short_circuit_ammeter",
+    "title": "Short circuit jumper",
+    "description": "A zero-resistance SPICE wire / jumper (W element) between nodes 2 and 3 that holds both nodes at the same potential while measuring branch current.",
+    "netlist": "* Short circuit jumper test\nV1 1 0 10\nR1 1 2 2k\nW1 2 3\nR2 3 0 3k\n.end\n",
+    "expected_voltages": {
+      "0": 0.0,
+      "1": 10.0,
+      "2": 6.0,
+      "3": 6.0
+    }
   }
 ]

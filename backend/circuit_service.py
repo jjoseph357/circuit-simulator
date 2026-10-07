@@ -136,10 +136,7 @@ def parse_eng_value_py(s: str) -> float:
     return val * mult
 
 _UNSUPPORTED_ELEMENTS = {
-
-    "J": "JFET", "E": "voltage-controlled voltage source", "F": "current-controlled current source",
-    "G": "voltage-controlled current source", "H": "current-controlled voltage source",
-    "K": "mutual inductance", "X": "subcircuit instance", "T": "transmission line",
+    "J": "JFET", "X": "subcircuit instance",
 }
 _SPICE_HINT = "SPICE element lines look like 'R1 1 2 1k': a name (its first letter is the part type), two node names and a value."
 _TYPE_BY_PREFIX = {"R": "Resistor", "I": "CurrentSource", "V": "VoltageSource"}
@@ -154,9 +151,13 @@ def _normalize_node_py(node: str) -> str:
 
 def _first_line_is_title(stmt: str) -> bool:
     tokens = [t for t in re.split(r'[\s,]+', stmt) if t]
+    if not tokens:
+        return True
     letter = tokens[0][0].upper()
     if letter in "DQM":
         return len(tokens) < (3 if letter == "D" else 4)
+    if letter in "EFGHOWKT":
+        return len(tokens) < (3 if letter == "W" else 4)
     if letter in _UNSUPPORTED_ELEMENTS:
         return len(tokens[0]) >= 3 and tokens[0].isalpha()
     if letter not in "RCLVI" or len(tokens) < 4:
@@ -185,6 +186,8 @@ def _parse_netlist_py(netlist: str) -> List[Dict[str, Any]]:
             raise ValueError(_NEEDS_RUST.format(what="Capacitors and inductors"))
         if re.match(r'[DQM][A-Za-z0-9_]*\s', stmt, re.I):
             raise ValueError(_NEEDS_RUST.format(what="Diodes and transistors (Newton–Raphson)"))
+        if re.match(r'[EFGHOWKT][A-Za-z0-9_]*\s', stmt, re.I):
+            raise ValueError(_NEEDS_RUST.format(what="OpAmps, controlled sources, short circuits, and coupled devices"))
         if re.search(r'\b(pulse|sin|pwl|ac)\b', stmt, re.I) and stmt[:1].upper() in ("V", "I"):
             raise ValueError(_NEEDS_RUST.format(what="Time-varying and AC sources"))
 

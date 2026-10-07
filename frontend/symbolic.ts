@@ -148,8 +148,66 @@ export function buildSymbolic(result: CircuitSimulationResult, comps: VisualCirc
         if (st.affected_cells_b.length) define(ieq, name, `${name}'s companion currents, the rest of its straight-line model`, i);
         break;
       }
-      default:
+      case 'ShortCircuit': {
+        const one = { base: '1' };
+        for (const c of st.affected_cells_g) add(Y, `${c.row},${c.col}`, term(one, c.delta, 1));
+        define(one, name, `connection constraint for ${name}`, i);
         break;
+      }
+      case 'OpAmp': {
+        const one = { base: '1' };
+        for (const c of st.affected_cells_g) {
+          if (Math.abs(Math.abs(c.delta) - 1) < 1e-9) {
+            add(Y, `${c.row},${c.col}`, term(one, c.delta, 1));
+          } else {
+            const sym = { base: 'A', sub: subOf(name) };
+            add(Y, `${c.row},${c.col}`, term(sym, c.delta, comp?.value || Math.abs(c.delta)));
+            define(sym, name, `gain A of ${name}`, i);
+          }
+        }
+        define(one, name, `virtual short / output constraint for ${name}`, i);
+        break;
+      }
+      case 'VCVS': {
+        const one = { base: '1' };
+        for (const c of st.affected_cells_g) {
+          if (Math.abs(Math.abs(c.delta) - 1) < 1e-9) {
+            add(Y, `${c.row},${c.col}`, term(one, c.delta, 1));
+          } else {
+            const sym = { base: 'E', sub: subOf(name) };
+            add(Y, `${c.row},${c.col}`, term(sym, c.delta, comp?.value || Math.abs(c.delta)));
+            define(sym, name, `voltage gain E of ${name}`, i);
+          }
+        }
+        define(one, name, `output branch coupling for ${name}`, i);
+        break;
+      }
+      case 'VCCS': {
+        const sym = { base: 'g', sub: `m,${subOf(name)}` };
+        for (const c of st.affected_cells_g) add(Y, `${c.row},${c.col}`, term(sym, c.delta, comp?.value || Math.abs(c.delta)));
+        define(sym, name, `transconductance gm of ${name}`, i);
+        break;
+      }
+      case 'CCCS':
+      case 'CCVS': {
+        const one = { base: '1' };
+        for (const c of st.affected_cells_g) {
+          if (Math.abs(Math.abs(c.delta) - 1) < 1e-9) {
+            add(Y, `${c.row},${c.col}`, term(one, c.delta, 1));
+          } else {
+            const sym = { base: comp?.type === 'CCCS' ? 'F' : 'r', sub: subOf(name) };
+            add(Y, `${c.row},${c.col}`, term(sym, c.delta, comp?.value || Math.abs(c.delta)));
+            define(sym, name, `${comp?.type} factor of ${name}`, i);
+          }
+        }
+        define(one, name, `branch coupling for ${name}`, i);
+        break;
+      }
+      default: {
+        const one = { base: '1' };
+        for (const c of st.affected_cells_g) add(Y, `${c.row},${c.col}`, term(one, c.delta, 1));
+        break;
+      }
     }
   });
   return { Y, b, defs: [...defs.values()], dynamic };
