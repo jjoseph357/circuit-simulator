@@ -153,15 +153,25 @@ function stripInlineComment(line: string): string {
  */
 export function isTitleLine(line: string, models: Map<string, ModelKind>): boolean {
   const t = line.trim().split(/[\s,]+/).filter(Boolean);
-  const letter = t[0]?.[0]?.toUpperCase();
-  if (!letter) return true;
+  if (!t.length) return true;
+  const isPlainWord = t[0].length >= 3 && /^[A-Za-z]+$/.test(t[0]);
+  const nameUp = t[0].toUpperCase();
+  if (nameUp.startsWith('SC') || nameUp.startsWith('OPEN')) return t.length < 3 || isPlainWord;
+  if (nameUp.startsWith('OP')) return t.length < 4 || isPlainWord;
+  const letter = nameUp[0];
   const numeric = (x: string | undefined) => x !== undefined && parseEngValue(x) !== null;
   const namesModel = (words: string[]) => words.length === 0 || words.some((w) => w.includes('=') || models.has(w.toLowerCase()) || /^DEFAULT_/i.test(w));
   if ('RCL'.includes(letter)) return t.length < 4 || !numeric(t[3]);
   if ('VI'.includes(letter)) return t.length < 4 || !(numeric(t[3]) || SOURCE_KEYWORDS.some((k) => t[3].toLowerCase().startsWith(k)));
   if (letter === 'D') return t.length < 3 || !namesModel(t.slice(3));
   if ('QM'.includes(letter)) return t.length < 4 || !namesModel(t.slice(4));
-  return !'JEFGHKXT'.includes(letter) || /^[A-Za-z]{3,}$/.test(t[0]);
+  if ('EG'.includes(letter)) return t.length < 6 || !numeric(t[5]) || isPlainWord;
+  if ('FH'.includes(letter)) return t.length < 5 || !numeric(t[t.length - 1]) || isPlainWord;
+  if (letter === 'O') return t.length < 4 || isPlainWord;
+  if (letter === 'T') return t.length < 8 || !numeric(t[5]) || !numeric(t[6]) || !numeric(t[7]) || isPlainWord;
+  if (letter === 'K') return t.length < 4 || !numeric(t[3]) || isPlainWord;
+  if (letter === 'W') return t.length < 3 || isPlainWord;
+  return !'JEFGHKXTOW'.includes(letter) || isPlainWord;
 }
 
 /** Element lines of a SPICE netlist, parsed with the same rules as the Rust engine. */
@@ -237,7 +247,7 @@ export interface LineInfo {
   element?: string;
 }
 
-const LETTER_HELP = 'The first letter says what the part is: R resistor, C capacitor, L inductor, V voltage source, I current source, D diode, Q BJT, M MOSFET.';
+const LETTER_HELP = 'The first letter says what the part is: R resistor, C capacitor, L inductor, V voltage source, I current source, D diode, Q BJT, M MOSFET, E/G/F/H controlled source, O OpAmp, T transformer, K coupling, W short circuit.';
 
 function tokenize(line: string): Array<{ text: string; start: number }> {
   const out: Array<{ text: string; start: number }> = [];
@@ -297,9 +307,107 @@ export function explainLine(raw: string, isFirstLine = false, models: Map<string
     return { text, error, tokens: mark(roles) };
   }
 
-  const letter = head[0].toUpperCase();
-  const type = TYPE_BY_LETTER[letter];
+  const headUpper = head.toUpperCase();
+  const letter = headUpper[0];
   const roles = new Map<number, TokenRole>([[words[0].start, 'name']]);
+
+  if (letter === 'W' || headUpper.startsWith('SC')) {
+    const nodes = words.slice(1, 3);
+    nodes.forEach((t) => roles.set(t.start, 'node'));
+    if (nodes.length < 2) return { text: `Short circuit ${head}`, error: 'A short circuit needs two node names, e.g. W1 1 2', tokens: mark(roles), element: head };
+    return { text: `Short circuit ${head}: ideal wire between ${nodeWord(nodes[0].text)} and ${nodeWord(nodes[1].text)}.`, tokens: mark(roles), element: head };
+  }
+
+  if (headUpper.startsWith('OPEN')) {
+    const nodes = words.slice(1, 3);
+    nodes.forEach((t) => roles.set(t.start, 'node'));
+    if (nodes.length < 2) return { text: `Open circuit ${head}`, error: 'An open circuit needs two node names, e.g. OPEN1 1 2', tokens: mark(roles), element: head };
+    return { text: `Open circuit ${head}: isolated branch (zero current) between ${nodeWord(nodes[0].text)} and ${nodeWord(nodes[1].text)}.`, tokens: mark(roles), element: head };
+  }
+
+  if (letter === 'K') {
+    if (words.length < 4) return { text: `Coupled inductors ${head}`, error: 'K card needs two inductors and coupling factor k, e.g. K1 L1 L2 0.95', tokens: mark(roles), element: head };
+    roles.set(words[1].start, 'name');
+    roles.set(words[2].start, 'name');
+    roles.set(words[3].start, 'value');
+    return { text: `Mutual coupling ${head}: couples inductors ${words[1].text} and ${words[2].text} with coupling factor k = ${words[3].text}.`, tokens: mark(roles), element: head };
+  }
+
+  if (letter === 'T') {
+    const nodes = words.slice(1, 5);
+    nodes.forEach((t) => roles.set(t.start, 'node'));
+    if (nodes.length < 4 || words.length < 8) return { text: `Transformer ${head}`, error: 'A transformer needs 4 nodes and L1, L2, M values, e.g. T1 1 0 2 0 10m 40m 18m', tokens: mark(roles), element: head };
+    for (const t of words.slice(5, 8)) roles.set(t.start, 'value');
+    return { text: `Transformer ${head}: primary between ${nodeWord(nodes[0].text)} and ${nodeWord(nodes[1].text)} (L1 = ${words[5].text} H), secondary between ${nodeWord(nodes[2].text)} and ${nodeWord(nodes[3].text)} (L2 = ${words[6].text} H), mutual inductance M = ${words[7].text} H.`, tokens: mark(roles), element: head };
+  }
+
+  if (letter === 'O' || headUpper.startsWith('OP')) {
+    if (words.length >= 5) {
+      const nodes = words.slice(1, 5);
+      nodes.forEach((t) => roles.set(t.start, 'node'));
+      if (words[5]) roles.set(words[5].start, 'value');
+      const gain = words[5] ? ` (finite gain A = ${words[5].text})` : ' (ideal virtual short)';
+      return { text: `OpAmp ${head}${gain}: output ${nodeWord(nodes[0].text)} to ${nodeWord(nodes[1].text)}, inputs ${nodeWord(nodes[2].text)} (+) and ${nodeWord(nodes[3].text)} (−).`, tokens: mark(roles), element: head };
+    } else if (words.length === 4) {
+      const nodes = words.slice(1, 4);
+      nodes.forEach((t) => roles.set(t.start, 'node'));
+      return { text: `OpAmp ${head} (ideal): output ${nodeWord(nodes[0].text)} to ground, inputs ${nodeWord(nodes[1].text)} (+) and ${nodeWord(nodes[2].text)} (−).`, tokens: mark(roles), element: head };
+    } else {
+      return { text: `OpAmp ${head}`, error: 'OpAmp needs output and input nodes, e.g. O1 out 0 in+ in- or O1 out in+ in-', tokens: mark(roles), element: head };
+    }
+  }
+
+  if (letter === 'E') {
+    const nodes = words.slice(1, 5);
+    nodes.forEach((t) => roles.set(t.start, 'node'));
+    if (nodes.length < 4 || words.length < 6) return { text: `VCVS ${head}`, error: 'VCVS needs 4 nodes and gain, e.g. E1 3 0 1 2 2.0', tokens: mark(roles), element: head };
+    roles.set(words[5].start, 'value');
+    return { text: `Voltage-controlled voltage source ${head} (gain = ${words[5].text}): output between ${nodeWord(nodes[0].text)} and ${nodeWord(nodes[1].text)}, controlled by ${nodeWord(nodes[2].text)} − ${nodeWord(nodes[3].text)}.`, tokens: mark(roles), element: head };
+  }
+
+  if (letter === 'G') {
+    const nodes = words.slice(1, 5);
+    nodes.forEach((t) => roles.set(t.start, 'node'));
+    if (nodes.length < 4 || words.length < 6) return { text: `VCCS ${head}`, error: 'VCCS needs 4 nodes and transconductance gm, e.g. G1 3 0 1 2 5m', tokens: mark(roles), element: head };
+    roles.set(words[5].start, 'value');
+    return { text: `Voltage-controlled current source ${head} (gm = ${words[5].text} S): output from ${nodeWord(nodes[0].text)} to ${nodeWord(nodes[1].text)}, controlled by ${nodeWord(nodes[2].text)} − ${nodeWord(nodes[3].text)}.`, tokens: mark(roles), element: head };
+  }
+
+  if (letter === 'F') {
+    if (words.length >= 6) {
+      const nodes = words.slice(1, 5);
+      nodes.forEach((t) => roles.set(t.start, 'node'));
+      roles.set(words[5].start, 'value');
+      return { text: `Current-controlled current source ${head} (gain = ${words[5].text}): output from ${nodeWord(nodes[0].text)} to ${nodeWord(nodes[1].text)}, controlled by branch ${nodeWord(nodes[2].text)} → ${nodeWord(nodes[3].text)}.`, tokens: mark(roles), element: head };
+    } else if (words.length >= 5) {
+      const nodes = words.slice(1, 3);
+      nodes.forEach((t) => roles.set(t.start, 'node'));
+      roles.set(words[3].start, 'name');
+      roles.set(words[4].start, 'value');
+      return { text: `Current-controlled current source ${head} (gain = ${words[4].text}): output from ${nodeWord(nodes[0].text)} to ${nodeWord(nodes[1].text)}, controlled by source ${words[3].text}.`, tokens: mark(roles), element: head };
+    } else {
+      return { text: `CCCS ${head}`, error: 'CCCS needs output nodes, control reference and gain, e.g. F1 3 0 V1 10 or F1 3 0 1 2 10', tokens: mark(roles), element: head };
+    }
+  }
+
+  if (letter === 'H') {
+    if (words.length >= 6) {
+      const nodes = words.slice(1, 5);
+      nodes.forEach((t) => roles.set(t.start, 'node'));
+      roles.set(words[5].start, 'value');
+      return { text: `Current-controlled voltage source ${head} (r = ${words[5].text} Ω): output between ${nodeWord(nodes[0].text)} and ${nodeWord(nodes[1].text)}, controlled by branch ${nodeWord(nodes[2].text)} → ${nodeWord(nodes[3].text)}.`, tokens: mark(roles), element: head };
+    } else if (words.length >= 5) {
+      const nodes = words.slice(1, 3);
+      nodes.forEach((t) => roles.set(t.start, 'node'));
+      roles.set(words[3].start, 'name');
+      roles.set(words[4].start, 'value');
+      return { text: `Current-controlled voltage source ${head} (r = ${words[4].text} Ω): output between ${nodeWord(nodes[0].text)} and ${nodeWord(nodes[1].text)}, controlled by source ${words[3].text}.`, tokens: mark(roles), element: head };
+    } else {
+      return { text: `CCVS ${head}`, error: 'CCVS needs output nodes, control reference and transresistance, e.g. H1 3 0 V1 1k or H1 3 0 1 2 1k', tokens: mark(roles), element: head };
+    }
+  }
+
+  const type = TYPE_BY_LETTER[letter];
   if (!type) {
     return { text: `Unknown part "${head}".`, error: LETTER_HELP, tokens: mark(roles) };
   }

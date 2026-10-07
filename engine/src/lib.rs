@@ -421,7 +421,16 @@ pub fn simulate_parsed(circuit: models::Circuit, solver: SolverKind, start_time:
         let v = |n: &str| *node_voltages.get(n).unwrap_or(&0.0);
         let power = match device_ops.iter().find(|o| o.name == comp.name) {
             Some(op) => op.terminals.iter().map(|t| v(&t.node) * t.current).sum(),
-            None => (v(&comp.node1) - v(&comp.node2)) * branch_currents[&comp.name],
+            None => match comp.comp_type {
+                ComponentType::Transformer { .. } => {
+                    let i1 = *branch_currents.get(&comp.name).unwrap_or(&0.0);
+                    let i2 = circuit.aux_index.get(&format!("{}:2", comp.name)).map(|&idx| solution_vector[idx]).unwrap_or(0.0);
+                    let sec_p = comp.extra_nodes.get(0).map(|s| s.as_str()).unwrap_or("0");
+                    let sec_m = comp.extra_nodes.get(1).map(|s| s.as_str()).unwrap_or("0");
+                    (v(&comp.node1) - v(&comp.node2)) * i1 + (v(sec_p) - v(sec_m)) * i2
+                }
+                _ => (v(&comp.node1) - v(&comp.node2)) * branch_currents[&comp.name],
+            },
         };
         branch_powers.insert(comp.name.clone(), power);
     }

@@ -176,7 +176,22 @@ fn element_currents(
         .map(|c| {
             let i = match c.comp_type {
                 ComponentType::Resistor { r_val } => (v(&c.node1) - v(&c.node2)) / r_val,
-                ComponentType::VoltageSource { .. } | ComponentType::Inductor { .. } => x[circuit.aux_index[&c.name]],
+                ComponentType::VoltageSource { .. }
+                | ComponentType::Inductor { .. }
+                | ComponentType::ShortCircuit
+                | ComponentType::Vcvs { .. }
+                | ComponentType::OpAmp { .. } => x[circuit.aux_index[&c.name]],
+                ComponentType::OpenCircuit => 0.0,
+                ComponentType::Vccs { gm } => gm * (v(&c.extra_nodes[0]) - v(&c.extra_nodes[1])),
+                ComponentType::Cccs { gain, ref v_ctrl } => {
+                    let i_in = match v_ctrl {
+                        Some(v_name) => x[circuit.aux_index[v_name]],
+                        None => x[circuit.aux_index[&c.name]],
+                    };
+                    gain * i_in
+                }
+                ComponentType::Ccvs { .. } => x[circuit.aux_index[&c.name]],
+                ComponentType::Transformer { .. } => x[circuit.aux_index[&c.name]],
                 ComponentType::CurrentSource { i_val } => match c.source.as_ref().and_then(|s| s.waveform.as_ref()) {
                     Some(w) => w.value_at(t),
                     None => i_val,

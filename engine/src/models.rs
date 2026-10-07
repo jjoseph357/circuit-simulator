@@ -19,6 +19,27 @@ pub enum ComponentType {
     /// Level-1 (Shichman–Hodges) MOSFET: drain = node1, gate = node2, source = extra_nodes[0].
     /// No body effect; the bulk terminal, if written, is ignored.
     Mosfet { vto: f64, kp: f64, lambda: f64, w: f64, l: f64, nmos: bool },
+    /// Short circuit between node1 and node2; adds branch current unknown and enforces V(1) - V(2) = 0.
+    ShortCircuit,
+    /// Open circuit between node1 and node2; carries zero current (i = 0).
+    OpenCircuit,
+    /// Voltage-controlled current source: output node1 -> node2, controlled by V(extra[0]) - V(extra[1]).
+    Vccs { gm: f64 },
+    /// Voltage-controlled voltage source: output node1 (+), node2 (-), controlled by V(extra[0]) - V(extra[1]).
+    Vcvs { gain: f64 },
+    /// Current-controlled current source: output node1 -> node2.
+    /// If v_ctrl is None: controlled by current through short-circuit branch between extra[0] and extra[1].
+    /// If v_ctrl is Some(v): controlled by current through independent voltage source v.
+    Cccs { gain: f64, v_ctrl: Option<String> },
+    /// Current-controlled voltage source: output node1 (+), node2 (-).
+    /// If v_ctrl is None: controlled by current through short-circuit branch between extra[0] and extra[1].
+    /// If v_ctrl is Some(v): controlled by current through independent voltage source v.
+    Ccvs { r_val: f64, v_ctrl: Option<String> },
+    /// Operational amplifier: output node1 (+), node2 (-); input extra[0] (+), extra[1] (-).
+    /// None = Ideal (virtual short V(in+) - V(in-) = 0); Some(A) = finite open-loop gain A.
+    OpAmp { gain: Option<f64> },
+    /// Transformer with primary node1, node2 and secondary extra[0], extra[1].
+    Transformer { l1: f64, l2: f64, m: f64 },
 }
 
 impl ComponentType {
@@ -101,9 +122,41 @@ impl Component {
                 vec![(self.node1.as_str(), e), (self.node2.as_str(), e)]
             }
             ComponentType::Mosfet { .. } => vec![(self.node1.as_str(), self.extra_nodes[0].as_str())],
+            ComponentType::OpenCircuit => vec![],
+            ComponentType::Vccs { .. } => vec![],
+            ComponentType::Vcvs { .. } | ComponentType::OpAmp { .. } => vec![(self.node1.as_str(), self.node2.as_str())],
+            ComponentType::Cccs { ref v_ctrl, .. } => {
+                if v_ctrl.is_none() && self.extra_nodes.len() >= 2 {
+                    vec![(self.extra_nodes[0].as_str(), self.extra_nodes[1].as_str())]
+                } else {
+                    vec![]
+                }
+            }
+            ComponentType::Ccvs { ref v_ctrl, .. } => {
+                let mut edges = vec![(self.node1.as_str(), self.node2.as_str())];
+                if v_ctrl.is_none() && self.extra_nodes.len() >= 2 {
+                    edges.push((self.extra_nodes[0].as_str(), self.extra_nodes[1].as_str()));
+                }
+                edges
+            }
+            ComponentType::Transformer { .. } => {
+                let mut edges = vec![(self.node1.as_str(), self.node2.as_str())];
+                if self.extra_nodes.len() >= 2 {
+                    edges.push((self.extra_nodes[0].as_str(), self.extra_nodes[1].as_str()));
+                }
+                edges
+            }
             _ => vec![(self.node1.as_str(), self.node2.as_str())],
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MutualCoupling {
+    pub name: String,
+    pub l1_name: String,
+    pub l2_name: String,
+    pub m: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +173,8 @@ pub struct Circuit {
     pub num_aux: usize,
     pub analyses: Vec<Analysis>,
     pub method: IntegrationMethod,
+    #[serde(default)]
+    pub mutual_couplings: Vec<MutualCoupling>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

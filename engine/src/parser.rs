@@ -85,13 +85,7 @@ pub fn parse_eng_value(s: &str) -> Result<f64, String> {
 fn unsupported_element_kind(letter: char) -> Option<&'static str> {
     match letter {
         'J' => Some("JFET"),
-        'E' => Some("voltage-controlled voltage source"),
-        'F' => Some("current-controlled current source"),
-        'G' => Some("voltage-controlled current source"),
-        'H' => Some("current-controlled voltage source"),
-        'K' => Some("mutual inductance"),
         'X' => Some("subcircuit instance"),
-        'T' => Some("transmission line"),
         _ => None,
     }
 }
@@ -111,7 +105,16 @@ const SOURCE_KEYWORDS: &[&str] = &["dc", "ac", "pulse", "sin", "pwl"];
 /// with an element instead, so the first line counts as a title only if it is not a valid element.
 fn first_line_is_title(line: &str, model_names: &HashSet<String>) -> bool {
     let tokens: Vec<&str> = line.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).collect();
-    let Some(letter) = tokens.first().and_then(|t| t.chars().next()).map(|c| c.to_ascii_uppercase()) else { return true };
+    let Some(first_tok) = tokens.first() else { return true };
+    let is_plain_word = first_tok.len() >= 3 && first_tok.chars().all(|c| c.is_ascii_alphabetic());
+    let name_up = first_tok.to_ascii_uppercase();
+    if name_up.starts_with("SC") || name_up.starts_with("OPEN") {
+        return tokens.len() < 3 || is_plain_word;
+    }
+    if name_up.starts_with("OP") {
+        return tokens.len() < 4 || is_plain_word;
+    }
+    let letter = first_tok.chars().next().unwrap().to_ascii_uppercase();
     let numeric = |t: &str| parse_eng_value(t).is_ok();
     let names_model = |words: &[&str]| words.is_empty() || words.iter().any(|w| w.contains('=') || model_names.contains(&w.to_ascii_lowercase()));
     match letter {
@@ -119,8 +122,14 @@ fn first_line_is_title(line: &str, model_names: &HashSet<String>) -> bool {
         'V' | 'I' => tokens.len() < 4 || !(numeric(tokens[3]) || SOURCE_KEYWORDS.iter().any(|k| tokens[3].to_ascii_lowercase().starts_with(k))),
         'D' => tokens.len() < 3 || !names_model(&tokens[3..]),
         'Q' | 'M' => tokens.len() < 4 || !names_model(&tokens[4..]),
-        // Real (unsupported) SPICE elements (E1, X2 ...) get their own, clearer error; a plain word is a title.
-        'J' | 'E' | 'F' | 'G' | 'H' | 'K' | 'X' | 'T' => tokens[0].len() >= 3 && tokens[0].chars().all(|c| c.is_ascii_alphabetic()),
+        'E' | 'G' => tokens.len() < 6 || !numeric(tokens[5]) || is_plain_word,
+        'F' | 'H' => tokens.len() < 5 || !numeric(tokens[tokens.len() - 1]) || is_plain_word,
+        'O' => tokens.len() < 4 || is_plain_word,
+        'T' => tokens.len() < 8 || !numeric(tokens[5]) || !numeric(tokens[6]) || !numeric(tokens[7]) || is_plain_word,
+        'K' => tokens.len() < 4 || !numeric(tokens[3]) || is_plain_word,
+        'W' => tokens.len() < 3 || is_plain_word,
+        // Real (unsupported) SPICE elements (J1, X2 ...) get their own, clearer error; a plain word is a title.
+        'J' | 'X' => is_plain_word,
         _ => true,
     }
 }
@@ -296,6 +305,13 @@ struct PendingDevice {
     instance: HashMap<String, f64>,
 }
 
+struct PendingCoupling {
+    name: String,
+    l1: String,
+    l2: String,
+    val: f64,
+}
+
 fn resolve_device(pd: &PendingDevice, models: &HashMap<String, ModelCard>, line: &str) -> Result<ComponentType, String> {
     // The model is the last word that names a .model card; for a MOSFET an earlier word is the bulk node.
     let named = pd.words.iter().rev().find(|w| models.contains_key(&w.to_ascii_lowercase()));
@@ -336,6 +352,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
     let mut method = IntegrationMethod::Trapezoidal;
     let mut models: HashMap<String, ModelCard> = HashMap::new();
     let mut pending: Vec<PendingDevice> = Vec::new();
+    let mut pending_couplings: Vec<PendingCoupling> = Vec::new();
 
     // .model cards may come after the devices that use them.
     let model_names: HashSet<String> = input
@@ -421,14 +438,248 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                 continue;
             }
 
+            let name = tokens[0].to_string();
+            let first_char = name.chars().next().unwrap().to_ascii_uppercase();
+
+            if first_char == 'K' {
+                if tokens.len() < 4 {
+                    return Err(format!("'{}' needs a name, two inductors and coupling factor or mutual inductance, e.g. K1 L1 L2 0.95.", trimmed));
+                }
+                pending_couplings.push(PendingCoupling {
+                    name: tokens[0].to_string(),
+                    l1: tokens[1].to_string(),
+                    l2: tokens[2].to_string(),
+                    val: parse_eng_value(tokens[3]).map_err(|e| format!("{} (in '{}')", e, trimmed))?,
+                });
+                continue;
+            }
+
+            if first_char == 'W' || name.to_ascii_uppercase().starts_with("SC") {
+                if tokens.len() < 3 {
+                    return Err(format!("'{}' needs a name and two nodes, e.g. W1 1 2.", trimmed));
+                }
+                components.push(Component {
+                    name,
+                    comp_type: ComponentType::ShortCircuit,
+                    node1: normalize_node(tokens[1]),
+                    node2: normalize_node(tokens[2]),
+                    original_line: trimmed.to_string(),
+                    source: None,
+                    extra_nodes: Vec::new(),
+                });
+                continue;
+            }
+
+            if name.to_ascii_uppercase().starts_with("OPEN") {
+                if tokens.len() < 3 {
+                    return Err(format!("'{}' needs a name and two nodes, e.g. OPEN1 1 2.", trimmed));
+                }
+                components.push(Component {
+                    name,
+                    comp_type: ComponentType::OpenCircuit,
+                    node1: normalize_node(tokens[1]),
+                    node2: normalize_node(tokens[2]),
+                    original_line: trimmed.to_string(),
+                    source: None,
+                    extra_nodes: Vec::new(),
+                });
+                continue;
+            }
+
+            if first_char == 'E' {
+                if tokens.len() < 6 {
+                    return Err(format!("'{}' needs a name, two output nodes, two control nodes and a gain, e.g. E1 3 0 1 2 2.0.", trimmed));
+                }
+                let n1 = normalize_node(tokens[1]);
+                let n2 = normalize_node(tokens[2]);
+                let nc1 = normalize_node(tokens[3]);
+                let nc2 = normalize_node(tokens[4]);
+                let comp_type = if tokens[5].eq_ignore_ascii_case("opamp") {
+                    let gain = tokens.get(6).and_then(|t| parse_eng_value(t).ok());
+                    ComponentType::OpAmp { gain }
+                } else {
+                    let gain = parse_eng_value(tokens[5]).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                    ComponentType::Vcvs { gain }
+                };
+                components.push(Component {
+                    name,
+                    comp_type,
+                    node1: n1,
+                    node2: n2,
+                    original_line: trimmed.to_string(),
+                    source: None,
+                    extra_nodes: vec![nc1, nc2],
+                });
+                continue;
+            }
+
+            if first_char == 'G' {
+                if tokens.len() < 6 {
+                    return Err(format!("'{}' needs a name, two output nodes, two control nodes and transconductance gm, e.g. G1 3 0 1 2 5m.", trimmed));
+                }
+                let n1 = normalize_node(tokens[1]);
+                let n2 = normalize_node(tokens[2]);
+                let nc1 = normalize_node(tokens[3]);
+                let nc2 = normalize_node(tokens[4]);
+                let gm = parse_eng_value(tokens[5]).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                components.push(Component {
+                    name,
+                    comp_type: ComponentType::Vccs { gm },
+                    node1: n1,
+                    node2: n2,
+                    original_line: trimmed.to_string(),
+                    source: None,
+                    extra_nodes: vec![nc1, nc2],
+                });
+                continue;
+            }
+
+            if first_char == 'F' {
+                if tokens.len() >= 6 {
+                    let n1 = normalize_node(tokens[1]);
+                    let n2 = normalize_node(tokens[2]);
+                    let nc1 = normalize_node(tokens[3]);
+                    let nc2 = normalize_node(tokens[4]);
+                    let gain = parse_eng_value(tokens[5]).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                    components.push(Component {
+                        name,
+                        comp_type: ComponentType::Cccs { gain, v_ctrl: None },
+                        node1: n1,
+                        node2: n2,
+                        original_line: trimmed.to_string(),
+                        source: None,
+                        extra_nodes: vec![nc1, nc2],
+                    });
+                    continue;
+                } else if tokens.len() >= 5 {
+                    let n1 = normalize_node(tokens[1]);
+                    let n2 = normalize_node(tokens[2]);
+                    let v_ctrl = tokens[3].to_string();
+                    let gain = parse_eng_value(tokens[4]).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                    components.push(Component {
+                        name,
+                        comp_type: ComponentType::Cccs { gain, v_ctrl: Some(v_ctrl) },
+                        node1: n1,
+                        node2: n2,
+                        original_line: trimmed.to_string(),
+                        source: None,
+                        extra_nodes: vec![],
+                    });
+                    continue;
+                } else {
+                    return Err(format!("'{}' needs at least 5 tokens, e.g. F1 3 0 V1 10 or F1 3 0 1 2 10.", trimmed));
+                }
+            }
+
+            if first_char == 'H' {
+                if tokens.len() >= 6 {
+                    let n1 = normalize_node(tokens[1]);
+                    let n2 = normalize_node(tokens[2]);
+                    let nc1 = normalize_node(tokens[3]);
+                    let nc2 = normalize_node(tokens[4]);
+                    let r_val = parse_eng_value(tokens[5]).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                    components.push(Component {
+                        name,
+                        comp_type: ComponentType::Ccvs { r_val, v_ctrl: None },
+                        node1: n1,
+                        node2: n2,
+                        original_line: trimmed.to_string(),
+                        source: None,
+                        extra_nodes: vec![nc1, nc2],
+                    });
+                    continue;
+                } else if tokens.len() >= 5 {
+                    let n1 = normalize_node(tokens[1]);
+                    let n2 = normalize_node(tokens[2]);
+                    let v_ctrl = tokens[3].to_string();
+                    let r_val = parse_eng_value(tokens[4]).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                    components.push(Component {
+                        name,
+                        comp_type: ComponentType::Ccvs { r_val, v_ctrl: Some(v_ctrl) },
+                        node1: n1,
+                        node2: n2,
+                        original_line: trimmed.to_string(),
+                        source: None,
+                        extra_nodes: vec![],
+                    });
+                    continue;
+                } else {
+                    return Err(format!("'{}' needs at least 5 tokens, e.g. H1 3 0 V1 1k or H1 3 0 1 2 1k.", trimmed));
+                }
+            }
+
+            if first_char == 'O' || name.to_ascii_uppercase().starts_with("OP") {
+                let (n1, n2, nc1, nc2, gain) = if tokens.len() >= 5 {
+                    let n1 = normalize_node(tokens[1]);
+                    let n2 = normalize_node(tokens[2]);
+                    let nc1 = normalize_node(tokens[3]);
+                    let nc2 = normalize_node(tokens[4]);
+                    let gain = tokens.get(5).and_then(|t| parse_eng_value(t).ok());
+                    (n1, n2, nc1, nc2, gain)
+                } else if tokens.len() == 4 {
+                    let n1 = normalize_node(tokens[1]);
+                    let n2 = "0".to_string();
+                    let nc1 = normalize_node(tokens[2]);
+                    let nc2 = normalize_node(tokens[3]);
+                    (n1, n2, nc1, nc2, None)
+                } else {
+                    return Err(format!("'{}' needs OpAmp output node(s) and input nodes, e.g. O1 out 0 in+ in- or O1 out in+ in-.", trimmed));
+                };
+                components.push(Component {
+                    name,
+                    comp_type: ComponentType::OpAmp { gain },
+                    node1: n1,
+                    node2: n2,
+                    original_line: trimmed.to_string(),
+                    source: None,
+                    extra_nodes: vec![nc1, nc2],
+                });
+                continue;
+            }
+
+            if first_char == 'T' {
+                if tokens.len() < 7 {
+                    return Err(format!("'{}' needs a transformer name, 4 nodes (p+ p- s+ s-) and inductances L1 L2 [M], e.g. T1 1 0 2 0 10m 10m 9m.", trimmed));
+                }
+                let n1 = normalize_node(tokens[1]);
+                let n2 = normalize_node(tokens[2]);
+                let ns1 = normalize_node(tokens[3]);
+                let ns2 = normalize_node(tokens[4]);
+                let l1 = parse_eng_value(tokens[5]).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                let l2 = parse_eng_value(tokens[6]).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                let m = if let Some(m_tok) = tokens.get(7) {
+                    if m_tok.to_ascii_lowercase().starts_with("k=") {
+                        let k = parse_eng_value(&m_tok[2..]).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                        k * (l1 * l2).sqrt()
+                    } else {
+                        let v = parse_eng_value(m_tok).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                        if v.abs() <= 1.0 && v != 0.0 && v != 1.0 {
+                            v * (l1 * l2).sqrt()
+                        } else {
+                            v
+                        }
+                    }
+                } else {
+                    0.999 * (l1 * l2).sqrt()
+                };
+                components.push(Component {
+                    name,
+                    comp_type: ComponentType::Transformer { l1, l2, m },
+                    node1: n1,
+                    node2: n2,
+                    original_line: trimmed.to_string(),
+                    source: None,
+                    extra_nodes: vec![ns1, ns2],
+                });
+                continue;
+            }
+
             if tokens.len() < 4 {
                 return Err(format!("'{}' needs a name, two nodes and a value, e.g. R1 1 2 1k.", trimmed));
             }
 
-            let name = tokens[0].to_string();
             let n1 = normalize_node(tokens[1]);
             let n2 = normalize_node(tokens[2]);
-            let first_char = name.chars().next().unwrap().to_ascii_uppercase();
 
             let (comp_type, source) = match first_char {
                 'V' | 'I' => {
@@ -465,13 +716,13 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                     match unsupported_element_kind(other) {
                         Some(kind) => {
                             return Err(format!(
-                                "'{}' is a {} ({}), which this engine does not simulate yet. Supported elements: R, C, L, V, I, D, Q and M.",
+                                "'{}' is a {} ({}), which this engine does not simulate yet. Supported elements: R, C, L, V, I, D, Q, M, E, G, F, H, O, T, K, W.",
                                 trimmed, kind, other
                             ))
                         }
                         None => {
                             return Err(format!(
-                                "'{}': unknown element '{}'. The first letter of a name says what the part is: R, C, L, V, I, D, Q or M.",
+                                "'{}': unknown element '{}'. Supported elements: R, C, L, V, I, D, Q, M, E, G, F, H, O, T, K, W.",
                                 trimmed, name
                             ))
                         }
@@ -500,6 +751,42 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
         components[pd.component].comp_type = resolve_device(pd, &models, &line)?;
     }
 
+    let mut mutual_couplings = Vec::new();
+    for pc in pending_couplings {
+        let l1 = components.iter().find(|c| c.name.eq_ignore_ascii_case(&pc.l1))
+            .ok_or_else(|| format!("Mutual coupling '{}' references unknown inductor '{}'.", pc.name, pc.l1))?;
+        let l2 = components.iter().find(|c| c.name.eq_ignore_ascii_case(&pc.l2))
+            .ok_or_else(|| format!("Mutual coupling '{}' references unknown inductor '{}'.", pc.name, pc.l2))?;
+        let (val1, val2) = match (&l1.comp_type, &l2.comp_type) {
+            (ComponentType::Inductor { l_val: v1 }, ComponentType::Inductor { l_val: v2 }) => (*v1, *v2),
+            _ => return Err(format!("'{}' and '{}' must both be inductors in mutual coupling '{}'.", pc.l1, pc.l2, pc.name)),
+        };
+        let m = if pc.val.abs() <= 1.0 {
+            pc.val * (val1 * val2).sqrt()
+        } else {
+            pc.val
+        };
+        mutual_couplings.push(crate::models::MutualCoupling {
+            name: pc.name,
+            l1_name: l1.name.clone(),
+            l2_name: l2.name.clone(),
+            m,
+        });
+    }
+
+    for c in &components {
+        let v_ctrl_opt = match &c.comp_type {
+            ComponentType::Cccs { v_ctrl, .. } => v_ctrl.as_ref(),
+            ComponentType::Ccvs { v_ctrl, .. } => v_ctrl.as_ref(),
+            _ => None,
+        };
+        if let Some(v_name) = v_ctrl_opt {
+            if !components.iter().any(|other| other.name.eq_ignore_ascii_case(v_name) && matches!(other.comp_type, ComponentType::VoltageSource { .. })) {
+                return Err(format!("Controlled source '{}' references unknown voltage source '{}'.", c.name, v_name));
+            }
+        }
+    }
+
     let mut seen_names = HashSet::new();
     for c in &components {
         if !seen_names.insert(c.name.to_ascii_uppercase()) {
@@ -517,6 +804,13 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
             ComponentType::Diode { is, n } => is * n,
             ComponentType::Bjt { is, bf, br, .. } => is * bf * br,
             ComponentType::Mosfet { kp, w, l, .. } => kp * w / l,
+            ComponentType::ShortCircuit | ComponentType::OpenCircuit => 0.0,
+            ComponentType::Vccs { gm } => gm,
+            ComponentType::Vcvs { gain } => gain,
+            ComponentType::Cccs { gain, .. } => gain,
+            ComponentType::Ccvs { r_val, .. } => r_val,
+            ComponentType::OpAmp { gain } => gain.unwrap_or(1e6),
+            ComponentType::Transformer { l1, l2, m } => l1 * l2 * m,
         };
         if !value.is_finite() {
             return Err(format!("Element {} has a non-finite value in '{}'.", c.name, c.original_line));
@@ -568,20 +862,75 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
 
     let num_nodes = non_ground_nodes.len();
 
-    // Branch-current unknowns: one per voltage source and per inductor, in netlist order.
+    // Branch-current unknowns:
     let mut variable_names: Vec<String> = non_ground_nodes.iter().map(|n| format!("V({})", n)).collect();
     let mut aux_index = HashMap::new();
     let mut num_v_sources = 0;
     for c in &components {
-        if matches!(c.comp_type, ComponentType::VoltageSource { .. } | ComponentType::Inductor { .. }) {
-            if matches!(c.comp_type, ComponentType::VoltageSource { .. }) {
+        match c.comp_type {
+            ComponentType::VoltageSource { .. } => {
                 num_v_sources += 1;
+                let idx = variable_names.len();
+                aux_index.insert(c.name.clone(), idx);
+                variable_names.push(format!("I({})", c.name));
             }
-            aux_index.insert(c.name.clone(), num_nodes + aux_index.len());
-            variable_names.push(format!("I({})", c.name));
+            ComponentType::Inductor { .. } => {
+                let idx = variable_names.len();
+                aux_index.insert(c.name.clone(), idx);
+                variable_names.push(format!("I({})", c.name));
+            }
+            ComponentType::ShortCircuit => {
+                let idx = variable_names.len();
+                aux_index.insert(c.name.clone(), idx);
+                variable_names.push(format!("I({})", c.name));
+            }
+            ComponentType::Vcvs { .. } => {
+                let idx = variable_names.len();
+                aux_index.insert(c.name.clone(), idx);
+                variable_names.push(format!("I({})", c.name));
+            }
+            ComponentType::OpAmp { .. } => {
+                let idx = variable_names.len();
+                aux_index.insert(c.name.clone(), idx);
+                variable_names.push(format!("I({})", c.name));
+            }
+            ComponentType::Cccs { ref v_ctrl, .. } => {
+                if v_ctrl.is_none() {
+                    let idx = variable_names.len();
+                    aux_index.insert(c.name.clone(), idx);
+                    variable_names.push(format!("I({})", c.name));
+                }
+            }
+            ComponentType::Ccvs { ref v_ctrl, .. } => {
+                if v_ctrl.is_none() {
+                    let idx1 = variable_names.len();
+                    aux_index.insert(format!("{}:ctrl", c.name), idx1);
+                    variable_names.push(format!("I1({})", c.name));
+
+                    let idx2 = variable_names.len();
+                    aux_index.insert(c.name.clone(), idx2);
+                    aux_index.insert(format!("{}:2", c.name), idx2);
+                    variable_names.push(format!("I2({})", c.name));
+                } else {
+                    let idx = variable_names.len();
+                    aux_index.insert(c.name.clone(), idx);
+                    variable_names.push(format!("I({})", c.name));
+                }
+            }
+            ComponentType::Transformer { .. } => {
+                let idx1 = variable_names.len();
+                aux_index.insert(c.name.clone(), idx1);
+                aux_index.insert(format!("{}:1", c.name), idx1);
+                variable_names.push(format!("I1({})", c.name));
+
+                let idx2 = variable_names.len();
+                aux_index.insert(format!("{}:2", c.name), idx2);
+                variable_names.push(format!("I2({})", c.name));
+            }
+            _ => {}
         }
     }
-    let num_aux = aux_index.len();
+    let num_aux = variable_names.len() - num_nodes;
 
     Ok(Circuit {
         components,
@@ -594,5 +943,6 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
         num_aux,
         analyses,
         method,
+        mutual_couplings,
     })
 }

@@ -118,7 +118,17 @@ fn reachable_from_ground<'a>(circuit: &'a Circuit, conducts: impl Fn(&ComponentT
 /// Elements that fix a node's DC voltage relative to its neighbours (capacitors are open in DC,
 /// current sources set currents, not voltages).
 fn conducts_dc(t: &ComponentType) -> bool {
-    matches!(t, ComponentType::Resistor { .. } | ComponentType::VoltageSource { .. } | ComponentType::Inductor { .. }) || t.is_nonlinear()
+    matches!(
+        t,
+        ComponentType::Resistor { .. }
+            | ComponentType::VoltageSource { .. }
+            | ComponentType::Inductor { .. }
+            | ComponentType::ShortCircuit
+            | ComponentType::Vcvs { .. }
+            | ComponentType::Ccvs { .. }
+            | ComponentType::OpAmp { .. }
+            | ComponentType::Transformer { .. }
+    ) || t.is_nonlinear()
 }
 
 /// Nodes whose only path to ground runs through capacitors. They have no DC operating point,
@@ -133,7 +143,7 @@ pub fn lint_circuit(circuit: &Circuit) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // 1. Ground Existence Check
-    let has_ground = circuit.components.iter().any(|c| c.node1 == "0" || c.node2 == "0");
+    let has_ground = circuit.components.iter().any(|c| c.nodes().contains(&"0"));
     if !has_ground {
         // A single connection to ground carries no current, so voltage differences are unchanged.
         let anchor = circuit
@@ -248,7 +258,7 @@ pub fn lint_circuit(circuit: &Circuit) -> Vec<Diagnostic> {
     // current sources still has an undetermined potential and a singular matrix.
     if has_ground {
         // Capacitor-only isolation is reported separately below (it is fine outside DC).
-        let visited = reachable_from_ground(circuit, |t| !matches!(t, ComponentType::CurrentSource { .. }));
+        let visited = reachable_from_ground(circuit, |t| !matches!(t, ComponentType::CurrentSource { .. } | ComponentType::Vccs { .. }));
 
         let unvisited_nodes: Vec<String> = circuit
             .node_names

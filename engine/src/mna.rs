@@ -227,6 +227,190 @@ pub fn build_mna_system(circuit: &Circuit) -> MnaSystem {
                     comp.name, comp.node1, comp.node2, fmt_num(v_val), aux_row + 1
                 );
             }
+            ComponentType::ShortCircuit => {
+                let aux = circuit.aux_index[&comp.name];
+                summary = format!("Short Circuit {} between {} and {}", comp.name, comp.node1, comp.node2);
+                g.stamp_incidence(n1_idx, n2_idx, aux, &mut affected_g);
+                explanation = format!(
+                    "Short circuit stamp: branch current I({}) is unknown (row/column {}), constraint V({}) − V({}) = 0 in row {}",
+                    comp.name, aux + 1, comp.node1, comp.node2, aux + 1
+                );
+            }
+            ComponentType::OpenCircuit => {
+                summary = format!("Open Circuit {} between {} and {}", comp.name, comp.node1, comp.node2);
+                explanation = "Open circuit carries zero current (i = 0), stamps nothing into the MNA matrix.".to_string();
+            }
+            ComponentType::Vccs { gm } => {
+                let ctrl_p = *circuit.node_to_idx.get(&comp.extra_nodes[0]).unwrap_or(&0);
+                let ctrl_m = *circuit.node_to_idx.get(&comp.extra_nodes[1]).unwrap_or(&0);
+                summary = format!("VCCS {} (gm = {} S): output {} -> {}, control {} - {}", comp.name, fmt_num(gm), comp.node1, comp.node2, comp.extra_nodes[0], comp.extra_nodes[1]);
+                let mut add_cell = |r: usize, c: usize, d: f64| {
+                    let nv = g.add(r, c, d);
+                    affected_g.push(StampingCell { row: r, col: c, delta: d, new_value: nv });
+                };
+                if n1_idx > 0 {
+                    let r = n1_idx - 1;
+                    if ctrl_p > 0 { add_cell(r, ctrl_p - 1, gm); }
+                    if ctrl_m > 0 { add_cell(r, ctrl_m - 1, -gm); }
+                }
+                if n2_idx > 0 {
+                    let r = n2_idx - 1;
+                    if ctrl_p > 0 { add_cell(r, ctrl_p - 1, -gm); }
+                    if ctrl_m > 0 { add_cell(r, ctrl_m - 1, gm); }
+                }
+                explanation = format!(
+                    "VCCS stamp: controlled current gm·(V({}) − V({})) = {}·ΔV stamped into KCL at nodes {} and {}",
+                    comp.extra_nodes[0], comp.extra_nodes[1], fmt_num(gm), comp.node1, comp.node2
+                );
+            }
+            ComponentType::Vcvs { gain } => {
+                let aux = circuit.aux_index[&comp.name];
+                let ctrl_p = *circuit.node_to_idx.get(&comp.extra_nodes[0]).unwrap_or(&0);
+                let ctrl_m = *circuit.node_to_idx.get(&comp.extra_nodes[1]).unwrap_or(&0);
+                summary = format!("VCVS {} (μ = {}): output {} (+), {} (-); control {} (+), {} (-)", comp.name, fmt_num(gain), comp.node1, comp.node2, comp.extra_nodes[0], comp.extra_nodes[1]);
+                let mut add_cell = |r: usize, c: usize, d: f64| {
+                    let nv = g.add(r, c, d);
+                    affected_g.push(StampingCell { row: r, col: c, delta: d, new_value: nv });
+                };
+                if n1_idx > 0 { add_cell(n1_idx - 1, aux, 1.0); }
+                if n2_idx > 0 { add_cell(n2_idx - 1, aux, -1.0); }
+                if n1_idx > 0 { add_cell(aux, n1_idx - 1, 1.0); }
+                if n2_idx > 0 { add_cell(aux, n2_idx - 1, -1.0); }
+                if ctrl_p > 0 { add_cell(aux, ctrl_p - 1, -gain); }
+                if ctrl_m > 0 { add_cell(aux, ctrl_m - 1, gain); }
+                explanation = format!(
+                    "VCVS stamp: branch current unknown I({}) in row/col {}, constraint V({}) − V({}) − {}·(V({}) − V({})) = 0 in row {}",
+                    comp.name, aux + 1, comp.node1, comp.node2, fmt_num(gain), comp.extra_nodes[0], comp.extra_nodes[1], aux + 1
+                );
+            }
+            ComponentType::Cccs { gain, ref v_ctrl } => {
+                let mut add_cell = |r: usize, c: usize, d: f64| {
+                    let nv = g.add(r, c, d);
+                    affected_g.push(StampingCell { row: r, col: c, delta: d, new_value: nv });
+                };
+                if let Some(src_name) = v_ctrl {
+                    let aux_ctrl = circuit.aux_index[src_name];
+                    summary = format!("CCCS {} (α = {}): output {} -> {}, controlled by {}", comp.name, fmt_num(gain), comp.node1, comp.node2, src_name);
+                    if n1_idx > 0 { add_cell(n1_idx - 1, aux_ctrl, gain); }
+                    if n2_idx > 0 { add_cell(n2_idx - 1, aux_ctrl, -gain); }
+                    explanation = format!(
+                        "CCCS stamp: controlled current α·I({}) = {}·I({}) enters nodes {} and {}",
+                        src_name, fmt_num(gain), src_name, comp.node1, comp.node2
+                    );
+                } else {
+                    let aux = circuit.aux_index[&comp.name];
+                    let ctrl_p = *circuit.node_to_idx.get(&comp.extra_nodes[0]).unwrap_or(&0);
+                    let ctrl_m = *circuit.node_to_idx.get(&comp.extra_nodes[1]).unwrap_or(&0);
+                    summary = format!("CCCS {} (α = {}): output {} -> {}, controlling branch {} -> {}", comp.name, fmt_num(gain), comp.node1, comp.node2, comp.extra_nodes[0], comp.extra_nodes[1]);
+                    if ctrl_p > 0 { add_cell(ctrl_p - 1, aux, 1.0); }
+                    if ctrl_m > 0 { add_cell(ctrl_m - 1, aux, -1.0); }
+                    if n1_idx > 0 { add_cell(n1_idx - 1, aux, gain); }
+                    if n2_idx > 0 { add_cell(n2_idx - 1, aux, -gain); }
+                    if ctrl_p > 0 { add_cell(aux, ctrl_p - 1, 1.0); }
+                    if ctrl_m > 0 { add_cell(aux, ctrl_m - 1, -1.0); }
+                    explanation = format!(
+                        "CCCS stamp: controlling current I1 unknown (row/col {}), V({}) − V({}) = 0, and α·I1 stamped into nodes {} and {}",
+                        aux + 1, comp.extra_nodes[0], comp.extra_nodes[1], comp.node1, comp.node2
+                    );
+                }
+            }
+            ComponentType::Ccvs { r_val, ref v_ctrl } => {
+                let mut add_cell = |r: usize, c: usize, d: f64| {
+                    let nv = g.add(r, c, d);
+                    affected_g.push(StampingCell { row: r, col: c, delta: d, new_value: nv });
+                };
+                if let Some(src_name) = v_ctrl {
+                    let aux_ctrl = circuit.aux_index[src_name];
+                    let aux_out = circuit.aux_index[&comp.name];
+                    summary = format!("CCVS {} (r = {} Ω): output {} (+), {} (-); controlled by {}", comp.name, fmt_num(r_val), comp.node1, comp.node2, src_name);
+                    if n1_idx > 0 { add_cell(n1_idx - 1, aux_out, 1.0); }
+                    if n2_idx > 0 { add_cell(n2_idx - 1, aux_out, -1.0); }
+                    if n1_idx > 0 { add_cell(aux_out, n1_idx - 1, 1.0); }
+                    if n2_idx > 0 { add_cell(aux_out, n2_idx - 1, -1.0); }
+                    add_cell(aux_out, aux_ctrl, -r_val);
+                    explanation = format!(
+                        "CCVS stamp: output current I2 (row/col {}), constraint V({}) − V({}) − {}·I({}) = 0 in row {}",
+                        aux_out + 1, comp.node1, comp.node2, fmt_num(r_val), src_name, aux_out + 1
+                    );
+                } else {
+                    let aux_ctrl = circuit.aux_index[&format!("{}:ctrl", comp.name)];
+                    let aux_out = circuit.aux_index[&comp.name];
+                    let ctrl_p = *circuit.node_to_idx.get(&comp.extra_nodes[0]).unwrap_or(&0);
+                    let ctrl_m = *circuit.node_to_idx.get(&comp.extra_nodes[1]).unwrap_or(&0);
+                    summary = format!("CCVS {} (r = {} Ω): output {} (+), {} (-); controlling branch {} -> {}", comp.name, fmt_num(r_val), comp.node1, comp.node2, comp.extra_nodes[0], comp.extra_nodes[1]);
+                    if ctrl_p > 0 { add_cell(ctrl_p - 1, aux_ctrl, 1.0); }
+                    if ctrl_m > 0 { add_cell(ctrl_m - 1, aux_ctrl, -1.0); }
+                    if ctrl_p > 0 { add_cell(aux_ctrl, ctrl_p - 1, 1.0); }
+                    if ctrl_m > 0 { add_cell(aux_ctrl, ctrl_m - 1, -1.0); }
+                    if n1_idx > 0 { add_cell(n1_idx - 1, aux_out, 1.0); }
+                    if n2_idx > 0 { add_cell(n2_idx - 1, aux_out, -1.0); }
+                    if n1_idx > 0 { add_cell(aux_out, n1_idx - 1, 1.0); }
+                    if n2_idx > 0 { add_cell(aux_out, n2_idx - 1, -1.0); }
+                    add_cell(aux_out, aux_ctrl, -r_val);
+                    explanation = format!(
+                        "CCVS stamp: controlling current I1 (row {}), output current I2 (row {}), with V({}) − V({}) − {}·I1 = 0",
+                        aux_ctrl + 1, aux_out + 1, comp.node1, comp.node2, fmt_num(r_val)
+                    );
+                }
+            }
+            ComponentType::OpAmp { gain } => {
+                let aux = circuit.aux_index[&comp.name];
+                let in_p = *circuit.node_to_idx.get(&comp.extra_nodes[0]).unwrap_or(&0);
+                let in_m = *circuit.node_to_idx.get(&comp.extra_nodes[1]).unwrap_or(&0);
+                let mut add_cell = |r: usize, c: usize, d: f64| {
+                    let nv = g.add(r, c, d);
+                    affected_g.push(StampingCell { row: r, col: c, delta: d, new_value: nv });
+                };
+                if n1_idx > 0 { add_cell(n1_idx - 1, aux, 1.0); }
+                if n2_idx > 0 { add_cell(n2_idx - 1, aux, -1.0); }
+                if let Some(a) = gain {
+                    summary = format!("Non-ideal OpAmp {} (Gain A = {}): out ({}, {}), in ({}, {})", comp.name, fmt_num(a), comp.node1, comp.node2, comp.extra_nodes[0], comp.extra_nodes[1]);
+                    if in_p > 0 { add_cell(aux, in_p - 1, -a); }
+                    if in_m > 0 { add_cell(aux, in_m - 1, a); }
+                    if n1_idx > 0 { add_cell(aux, n1_idx - 1, 1.0); }
+                    if n2_idx > 0 { add_cell(aux, n2_idx - 1, -1.0); }
+                    explanation = format!(
+                        "Non-ideal OpAmp stamp: output current Io (row/col {}), constraint V({}) − V({}) = {}·(V({}) − V({}))",
+                        aux + 1, comp.node1, comp.node2, fmt_num(a), comp.extra_nodes[0], comp.extra_nodes[1]
+                    );
+                } else {
+                    summary = format!("Ideal OpAmp {}: out ({}, {}), in ({}, {})", comp.name, comp.node1, comp.node2, comp.extra_nodes[0], comp.extra_nodes[1]);
+                    if in_p > 0 { add_cell(aux, in_p - 1, 1.0); }
+                    if in_m > 0 { add_cell(aux, in_m - 1, -1.0); }
+                    explanation = format!(
+                        "Ideal OpAmp stamp: output current Io (row/col {}), virtual short constraint V({}) − V({}) = 0 in row {}",
+                        aux + 1, comp.extra_nodes[0], comp.extra_nodes[1], aux + 1
+                    );
+                }
+            }
+            ComponentType::Transformer { l1, l2, m } => {
+                let aux1 = circuit.aux_index[&comp.name];
+                let aux2 = circuit.aux_index[&format!("{}:2", comp.name)];
+                let sec_p = *circuit.node_to_idx.get(&comp.extra_nodes[0]).unwrap_or(&0);
+                let sec_m = *circuit.node_to_idx.get(&comp.extra_nodes[1]).unwrap_or(&0);
+                summary = format!("Transformer {} (L1 = {} H, L2 = {} H, M = {} H): primary ({}, {}), secondary ({}, {})",
+                    comp.name, fmt_num(l1), fmt_num(l2), fmt_num(m), comp.node1, comp.node2, comp.extra_nodes[0], comp.extra_nodes[1]);
+                let mut add_cell_g = |r: usize, c: usize, d: f64| {
+                    let nv = g.add(r, c, d);
+                    affected_g.push(StampingCell { row: r, col: c, delta: d, new_value: nv });
+                };
+                let mut add_cell_c = |r: usize, c: usize, d: f64| {
+                    let nv = cm.add(r, c, d);
+                    affected_c.push(StampingCell { row: r, col: c, delta: d, new_value: nv });
+                };
+                if n1_idx > 0 { add_cell_g(n1_idx - 1, aux1, 1.0); add_cell_g(aux1, n1_idx - 1, 1.0); }
+                if n2_idx > 0 { add_cell_g(n2_idx - 1, aux1, -1.0); add_cell_g(aux1, n2_idx - 1, -1.0); }
+                if sec_p > 0 { add_cell_g(sec_p - 1, aux2, 1.0); add_cell_g(aux2, sec_p - 1, 1.0); }
+                if sec_m > 0 { add_cell_g(sec_m - 1, aux2, -1.0); add_cell_g(aux2, sec_m - 1, -1.0); }
+                add_cell_c(aux1, aux1, -l1);
+                add_cell_c(aux1, aux2, -m);
+                add_cell_c(aux2, aux1, -m);
+                add_cell_c(aux2, aux2, -l2);
+                explanation = format!(
+                    "Transformer stamp: primary I1 (row/col {}), secondary I2 (row/col {}), −L1, −L2 and −M stamped into dynamic matrix C",
+                    aux1 + 1, aux2 + 1
+                );
+            }
         }
 
         if educational {
@@ -240,6 +424,30 @@ pub fn build_mna_system(circuit: &Circuit) -> MnaSystem {
                 vector_b_snapshot: b_running.clone(),
                 explanation,
                 affected_cells_c: affected_c,
+                matrix_c_snapshot: cm.dense.clone().unwrap_or_default(),
+            });
+        }
+    }
+
+    for mc in &circuit.mutual_couplings {
+        let aux1 = circuit.aux_index[&mc.l1_name];
+        let aux2 = circuit.aux_index[&mc.l2_name];
+        let nv1 = cm.add(aux1, aux2, -mc.m);
+        let nv2 = cm.add(aux2, aux1, -mc.m);
+        if educational {
+            timeline.push(StampingStep {
+                step_index: timeline.len() + 1,
+                component_name: mc.name.clone(),
+                component_summary: format!("Mutual Inductance {} (M = {} H) between {} and {}", mc.name, fmt_num(mc.m), mc.l1_name, mc.l2_name),
+                affected_cells_g: vec![],
+                affected_cells_b: vec![],
+                matrix_g_snapshot: g.dense.clone().unwrap_or_default(),
+                vector_b_snapshot: b_running.clone(),
+                explanation: format!("Mutual coupling stamp: −M = −{} H in dynamic matrix C at ({},{}) and ({},{})", fmt_num(mc.m), mc.l1_name, mc.l2_name, mc.l2_name, mc.l1_name),
+                affected_cells_c: vec![
+                    StampingCell { row: aux1, col: aux2, delta: -mc.m, new_value: nv1 },
+                    StampingCell { row: aux2, col: aux1, delta: -mc.m, new_value: nv2 },
+                ],
                 matrix_c_snapshot: cm.dense.clone().unwrap_or_default(),
             });
         }
@@ -358,9 +566,8 @@ pub fn generate_kcl_equations(
         if comp.comp_type.is_nonlinear() {
             continue; // added from their terminal currents below
         }
-        incident.entry(comp.node1.as_str()).or_default().push(comp);
-        if comp.node2 != comp.node1 {
-            incident.entry(comp.node2.as_str()).or_default().push(comp);
+        for n in comp.nodes() {
+            incident.entry(n).or_default().push(comp);
         }
     }
 
@@ -413,11 +620,11 @@ pub fn generate_kcl_equations(
                         total_leaving -= i_val;
                     }
                 }
-                ComponentType::Capacitor { .. } => {
+                ComponentType::Capacitor { .. } | ComponentType::OpenCircuit => {
                     // Open circuit in DC: contributes no current to the operating-point KCL.
                 }
                 ComponentType::Diode { .. } | ComponentType::Bjt { .. } | ComponentType::Mosfet { .. } => {}
-                ComponentType::VoltageSource { .. } | ComponentType::Inductor { .. } => {
+                ComponentType::ShortCircuit | ComponentType::VoltageSource { .. } | ComponentType::Inductor { .. } | ComponentType::Vcvs { .. } | ComponentType::OpAmp { .. } => {
                     if comp.node1 == *node_name {
                         terms.push((
                             true,
@@ -432,6 +639,72 @@ pub fn generate_kcl_equations(
                             format!("I_{{{}}}", comp.name)
                         ));
                         total_leaving -= current;
+                    }
+                }
+                ComponentType::Vccs { .. } => {
+                    if comp.node1 == *node_name {
+                        terms.push((true, format!("I({})", comp.name), format!("I_{{{}}}", comp.name)));
+                        total_leaving += current;
+                    } else if comp.node2 == *node_name {
+                        terms.push((false, format!("I({})", comp.name), format!("I_{{{}}}", comp.name)));
+                        total_leaving -= current;
+                    }
+                }
+                ComponentType::Cccs { ref v_ctrl, .. } => {
+                    if comp.node1 == *node_name {
+                        terms.push((true, format!("I({})", comp.name), format!("I_{{{}}}", comp.name)));
+                        total_leaving += current;
+                    } else if comp.node2 == *node_name {
+                        terms.push((false, format!("I({})", comp.name), format!("I_{{{}}}", comp.name)));
+                        total_leaving -= current;
+                    }
+                    if v_ctrl.is_none() && comp.extra_nodes.len() >= 2 {
+                        let i1 = *branch_currents.get(&comp.name).unwrap_or(&0.0);
+                        if comp.extra_nodes[0] == *node_name {
+                            terms.push((true, format!("I1({})", comp.name), format!("I_{{1,{}}}", comp.name)));
+                            total_leaving += i1;
+                        } else if comp.extra_nodes[1] == *node_name {
+                            terms.push((false, format!("I1({})", comp.name), format!("I_{{1,{}}}", comp.name)));
+                            total_leaving -= i1;
+                        }
+                    }
+                }
+                ComponentType::Ccvs { ref v_ctrl, .. } => {
+                    if comp.node1 == *node_name {
+                        terms.push((true, format!("I({})", comp.name), format!("I_{{{}}}", comp.name)));
+                        total_leaving += current;
+                    } else if comp.node2 == *node_name {
+                        terms.push((false, format!("I({})", comp.name), format!("I_{{{}}}", comp.name)));
+                        total_leaving -= current;
+                    }
+                    if v_ctrl.is_none() && comp.extra_nodes.len() >= 2 {
+                        let i1 = *branch_currents.get(&format!("{}:ctrl", comp.name)).unwrap_or(&0.0);
+                        if comp.extra_nodes[0] == *node_name {
+                            terms.push((true, format!("I1({})", comp.name), format!("I_{{1,{}}}", comp.name)));
+                            total_leaving += i1;
+                        } else if comp.extra_nodes[1] == *node_name {
+                            terms.push((false, format!("I1({})", comp.name), format!("I_{{1,{}}}", comp.name)));
+                            total_leaving -= i1;
+                        }
+                    }
+                }
+                ComponentType::Transformer { .. } => {
+                    if comp.node1 == *node_name {
+                        terms.push((true, format!("I1({})", comp.name), format!("I_{{1,{}}}", comp.name)));
+                        total_leaving += current;
+                    } else if comp.node2 == *node_name {
+                        terms.push((false, format!("I1({})", comp.name), format!("I_{{1,{}}}", comp.name)));
+                        total_leaving -= current;
+                    }
+                    if comp.extra_nodes.len() >= 2 {
+                        let i2 = *branch_currents.get(&format!("{}:2", comp.name)).unwrap_or(&0.0);
+                        if comp.extra_nodes[0] == *node_name {
+                            terms.push((true, format!("I2({})", comp.name), format!("I_{{2,{}}}", comp.name)));
+                            total_leaving += i2;
+                        } else if comp.extra_nodes[1] == *node_name {
+                            terms.push((false, format!("I2({})", comp.name), format!("I_{{2,{}}}", comp.name)));
+                            total_leaving -= i2;
+                        }
                     }
                 }
             }
