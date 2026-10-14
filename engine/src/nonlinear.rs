@@ -241,6 +241,66 @@ pub fn linearize_device(circuit: &Circuit, comp: &Component, x: &[f64], state: &
             let branches = vec![Branch { p: d, q: s, i0: p * (id - gm * vgs - gds * vds), ctrls: vec![(g, s, gm), (d, s, gds)] }];
             (branches, op, limited)
         }
+        ComponentType::Switch { ron, roff, vt } => {
+            let (p, q) = (idx(&comp.node1), idx(&comp.node2));
+            let (cp, cn) = if comp.extra_nodes.len() >= 2 {
+                (idx(&comp.extra_nodes[0]), idx(&comp.extra_nodes[1]))
+            } else if comp.extra_nodes.len() == 1 {
+                (idx(&comp.extra_nodes[0]), 0)
+            } else {
+                (0, 0)
+            };
+            let vc = v_at(x, cp) - v_at(x, cn);
+            let vd = v_at(x, p) - v_at(x, q);
+
+            let g_on = 1.0 / ron.max(1e-9);
+            let g_off = 1.0 / roff.max(1e-9);
+
+            let vw = 0.05f64.max(vt.abs() * 0.02);
+            let s = (vc - vt) / vw;
+            let (sigma, dsigma) = if s > 40.0 {
+                (1.0, 0.0)
+            } else if s < -40.0 {
+                (0.0, 0.0)
+            } else {
+                let exp_neg = (-s).exp();
+                let sig = 1.0 / (1.0 + exp_neg);
+                let dsig = sig * (1.0 - sig) / vw;
+                (sig, dsig)
+            };
+
+            let g = g_off + (g_on - g_off) * sigma;
+            let g_ctrl = (g_on - g_off) * dsigma * vd;
+            let id = g * vd;
+
+            let region = if vc >= vt { "closed (on)" } else { "open (off)" };
+            let op = DeviceOp {
+                name: comp.name.clone(),
+                kind: "switch".into(),
+                region: region.into(),
+                quantities: vec![
+                    ("Vc".into(), vc),
+                    ("Vd".into(), vd),
+                    ("Id".into(), id),
+                    ("R".into(), 1.0 / g),
+                    ("g".into(), g),
+                ],
+                terminals: vec![
+                    TerminalCurrent { role: "in".into(), node: comp.node1.clone(), current: id },
+                    TerminalCurrent { role: "out".into(), node: comp.node2.clone(), current: -id },
+                ],
+            };
+
+            let branches = vec![
+                Branch {
+                    p,
+                    q,
+                    i0: id - g * vd - g_ctrl * vc,
+                    ctrls: vec![(p, q, g), (cp, cn, g_ctrl)],
+                }
+            ];
+            (branches, op, false)
+        }
         _ => (Vec::new(), DeviceOp { name: comp.name.clone(), kind: String::new(), region: String::new(), quantities: vec![], terminals: vec![] }, false),
     }
 }
@@ -481,7 +541,9 @@ pub fn element_currents_at(circuit: &Circuit, x: &[f64], ops: &[DeviceOp]) -> Ha
                     gain * i_in
                 }
                 ComponentType::Ccvs { .. } => x[circuit.aux_index[&c.name]],
-                ComponentType::Transformer { .. } => x[circuit.aux_index[&c.name]],
+                ComponentType::Switch { .. } => {
+                    dev.get(c.name.as_str()).and_then(|o| o.terminals.first()).map(|t| t.current).unwrap_or(0.0)
+                }
                 _ => dev.get(c.name.as_str()).and_then(|o| o.terminals.first()).map(|t| t.current).unwrap_or(0.0),
             };
             (c.name.clone(), i)

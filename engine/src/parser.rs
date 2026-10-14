@@ -85,7 +85,6 @@ pub fn parse_eng_value(s: &str) -> Result<f64, String> {
 fn unsupported_element_kind(letter: char) -> Option<&'static str> {
     match letter {
         'J' => Some("JFET"),
-        'X' => Some("subcircuit instance"),
         _ => None,
     }
 }
@@ -128,8 +127,10 @@ fn first_line_is_title(line: &str, model_names: &HashSet<String>) -> bool {
         'T' => tokens.len() < 8 || !numeric(tokens[5]) || !numeric(tokens[6]) || !numeric(tokens[7]) || is_plain_word,
         'K' => tokens.len() < 4 || !numeric(tokens[3]) || is_plain_word,
         'W' => tokens.len() < 3 || is_plain_word,
-        // Real (unsupported) SPICE elements (J1, X2 ...) get their own, clearer error; a plain word is a title.
-        'J' | 'X' => is_plain_word,
+        'S' => tokens.len() < 5 || is_plain_word,
+        'X' => tokens.len() < 3 || is_plain_word,
+        // Real (unsupported) SPICE elements (J1 ...) get their own, clearer error; a plain word is a title.
+        'J' => is_plain_word,
         _ => true,
     }
 }
@@ -213,8 +214,14 @@ fn parse_source_spec(rest: &str, line: &str) -> Result<(f64, Option<SourceSpec>)
     Ok((dc_value, if has_spec { Some(spec) } else { None }))
 }
 
-/// Parses `.ac`, `.tran` and `.options`; other control cards are ignored.
-fn parse_directive(trimmed: &str, analyses: &mut Vec<Analysis>, method: &mut IntegrationMethod) -> Result<(), String> {
+/// Parses SPICE control directives: `.ac`, `.tran`, `.dc`, `.options`, `.mor`, `.tf`, `.meas`, `.ic`.
+fn parse_directive(
+    trimmed: &str,
+    analyses: &mut Vec<Analysis>,
+    method: &mut IntegrationMethod,
+    uic: &mut bool,
+    initial_node_voltages: &mut HashMap<String, f64>,
+) -> Result<(), String> {
     let lower = trimmed.to_ascii_lowercase();
     let tokens: Vec<&str> = lower.split(|c: char| c.is_whitespace() || c == ',').filter(|s| !s.is_empty()).collect();
     let num = |i: usize| -> Result<f64, String> {
@@ -222,23 +229,34 @@ fn parse_directive(trimmed: &str, analyses: &mut Vec<Analysis>, method: &mut Int
     };
     match tokens.first().copied() {
         Some(".ac") => {
-            let sweep = match tokens.get(1).copied() {
-                Some("dec") => SweepType::Dec,
-                Some("oct") => SweepType::Oct,
-                Some("lin") => SweepType::Lin,
-                _ => return Err(format!("'.ac' needs a sweep type (dec, oct or lin): '{}'", trimmed)),
-            };
-            let points = num(2)?.round() as usize;
-            let (fstart, fstop) = (num(3)?, num(4)?);
-            if points == 0 || fstart <= 0.0 || fstop < fstart {
-                return Err(format!("'.ac' needs points ≥ 1 and 0 < fstart ≤ fstop: '{}'", trimmed));
+            if tokens.len() == 2 {
+                let f = parse_eng_value(tokens[1]).map_err(|e| format!("{} (in '{}')", e, trimmed))?;
+                if f <= 0.0 {
+                    return Err(format!("'.ac' frequency must be > 0: '{}'", trimmed));
+                }
+                analyses.push(Analysis::Ac { sweep: SweepType::Lin, points: 1, fstart: f, fstop: f });
+            } else {
+                let sweep = match tokens.get(1).copied() {
+                    Some("dec") => SweepType::Dec,
+                    Some("oct") => SweepType::Oct,
+                    Some("lin") => SweepType::Lin,
+                    _ => return Err(format!("'.ac' needs a sweep type (dec, oct or lin) or single frequency: '{}'", trimmed)),
+                };
+                let points = num(2)?.round() as usize;
+                let (fstart, fstop) = (num(3)?, num(4)?);
+                if points == 0 || fstart <= 0.0 || fstop < fstart {
+                    return Err(format!("'.ac' needs points ≥ 1 and 0 < fstart ≤ fstop: '{}'", trimmed));
+                }
+                analyses.push(Analysis::Ac { sweep, points, fstart, fstop });
             }
-            analyses.push(Analysis::Ac { sweep, points, fstart, fstop });
         }
         Some(".tran") => {
             let (tstep, tstop) = (num(1)?, num(2)?);
             let tstart = if tokens.len() > 3 && tokens[3] != "uic" { num(3)? } else { 0.0 };
             let tmax = if tokens.len() > 4 && tokens[4] != "uic" { Some(num(4)?) } else { None };
+            if tokens.iter().any(|&t| t == "uic") {
+                *uic = true;
+            }
             if tstep <= 0.0 || tstop <= 0.0 || tstart < 0.0 || tstart >= tstop {
                 return Err(format!("'.tran' needs tstep > 0 and 0 ≤ tstart < tstop: '{}'", trimmed));
             }
@@ -258,10 +276,55 @@ fn parse_directive(trimmed: &str, analyses: &mut Vec<Analysis>, method: &mut Int
             if let Some(m) = tokens.iter().position(|t| t.starts_with("method")) {
                 let value = tokens[m].split('=').nth(1).filter(|v| !v.is_empty()).or_else(|| tokens.get(m + 1).copied()).unwrap_or("");
                 *method = match value.trim_start_matches('=') {
-                    "euler" | "be" | "backward_euler" | "gear" => IntegrationMethod::BackwardEuler,
+                    "euler" | "be" | "backward_euler" => IntegrationMethod::BackwardEuler,
                     "trap" | "trapezoidal" => IntegrationMethod::Trapezoidal,
-                    other => return Err(format!("Unknown integration method '{}' (use trap or euler)", other)),
+                    "gear" | "bdf2" | "gear2" => IntegrationMethod::Gear,
+                    other => return Err(format!("Unknown integration method '{}' (use trap, euler, or gear)", other)),
                 };
+            }
+        }
+        Some(".mor") => {
+            let order = if tokens.len() > 1 {
+                tokens[1].parse::<usize>().unwrap_or(4)
+            } else {
+                4
+            };
+            let output_node = if tokens.len() > 2 {
+                let n = tokens[2].trim_start_matches("v(").trim_end_matches(')');
+                Some(normalize_node(n))
+            } else {
+                None
+            };
+            analyses.push(Analysis::Mor { order, output_node });
+        }
+        Some(".tf") => {
+            if tokens.len() < 3 {
+                return Err(format!("'.tf' needs output variable and input source: '{}'", trimmed));
+            }
+            let out_var = tokens[1].to_string();
+            let in_src = tokens[2].to_string();
+            analyses.push(Analysis::Tf { out_var, in_src });
+        }
+        Some(".meas") | Some(".measure") => {
+            let (target_analysis, name, metric, variable) = if tokens.len() >= 5 && (tokens[1] == "tran" || tokens[1] == "ac" || tokens[1] == "dc") {
+                (tokens[1].to_uppercase(), tokens[2].to_string(), tokens[3].to_uppercase(), tokens[4].to_string())
+            } else if tokens.len() >= 4 {
+                ("TRAN".to_string(), tokens[1].to_string(), tokens[2].to_uppercase(), tokens[3].to_string())
+            } else {
+                return Err(format!("'.meas' requires name, metric (MAX, MIN, PP, AVG, RMS), and variable in '{}'", trimmed));
+            };
+            analyses.push(Analysis::Measure { target_analysis, name, metric, variable });
+        }
+        Some(".ic") => {
+            *uic = true;
+            let cleaned = trimmed.replace(" = ", "=").replace(" =", "=").replace("= ", "=");
+            let parts: Vec<&str> = cleaned.split_whitespace().collect();
+            for t in &parts[1..] {
+                if let Some((k, v)) = t.split_once('=') {
+                    let n = k.trim_start_matches("v(").trim_start_matches("V(").trim_end_matches(')');
+                    let val = parse_eng_value(v).map_err(|e| format!("{} in .ic", e))?;
+                    initial_node_voltages.insert(normalize_node(n), val);
+                }
             }
         }
         _ => {}
@@ -346,16 +409,271 @@ fn resolve_device(pd: &PendingDevice, models: &HashMap<String, ModelCard>, line:
     })
 }
 
+struct SubcktDef {
+    ports: Vec<String>,
+    lines: Vec<String>,
+}
+
+fn map_subckt_node(node: &str, port_map: &HashMap<String, String>, inst: &str) -> String {
+    let norm = normalize_node(node);
+    if norm == "0" {
+        return "0".to_string();
+    }
+    if let Some(mapped) = port_map.get(&node.to_ascii_uppercase()) {
+        return mapped.clone();
+    }
+    format!("{}_{}", inst, node)
+}
+
+fn rewrite_subckt_element(
+    tokens: &[&str],
+    new_name: &str,
+    port_map: &HashMap<String, String>,
+    inst_name: &str,
+    sub_elements: &HashSet<String>,
+) -> String {
+    let first_char = tokens[0].chars().next().unwrap().to_ascii_uppercase();
+    let mut out_tokens = Vec::new();
+    out_tokens.push(new_name.to_string());
+
+    match first_char {
+        'R' | 'C' | 'L' | 'V' | 'I' | 'D' | 'W' => {
+            if tokens.len() > 1 { out_tokens.push(map_subckt_node(tokens[1], port_map, inst_name)); }
+            if tokens.len() > 2 { out_tokens.push(map_subckt_node(tokens[2], port_map, inst_name)); }
+            for t in &tokens[3..] { out_tokens.push(t.to_string()); }
+        }
+        'Q' => {
+            for i in 1..=3.min(tokens.len() - 1) {
+                out_tokens.push(map_subckt_node(tokens[i], port_map, inst_name));
+            }
+            for t in &tokens[4..] { out_tokens.push(t.to_string()); }
+        }
+        'M' => {
+            let max_nodes = if tokens.len() >= 6 && !tokens[4].contains('=') && !tokens[5].contains('=') { 4 } else { 3 };
+            for i in 1..=max_nodes.min(tokens.len() - 1) {
+                out_tokens.push(map_subckt_node(tokens[i], port_map, inst_name));
+            }
+            for t in &tokens[max_nodes + 1..] { out_tokens.push(t.to_string()); }
+        }
+        'S' => {
+            for i in 1..=4.min(tokens.len() - 1) {
+                out_tokens.push(map_subckt_node(tokens[i], port_map, inst_name));
+            }
+            for t in &tokens[5..] { out_tokens.push(t.to_string()); }
+        }
+        'E' | 'G' => {
+            for i in 1..=4.min(tokens.len() - 1) {
+                out_tokens.push(map_subckt_node(tokens[i], port_map, inst_name));
+            }
+            for t in &tokens[5..] { out_tokens.push(t.to_string()); }
+        }
+        'F' | 'H' => {
+            if tokens.len() >= 6 {
+                for i in 1..=4 {
+                    out_tokens.push(map_subckt_node(tokens[i], port_map, inst_name));
+                }
+                for t in &tokens[5..] { out_tokens.push(t.to_string()); }
+            } else if tokens.len() >= 5 {
+                out_tokens.push(map_subckt_node(tokens[1], port_map, inst_name));
+                out_tokens.push(map_subckt_node(tokens[2], port_map, inst_name));
+                let v_ctrl = tokens[3];
+                if sub_elements.contains(&v_ctrl.to_ascii_uppercase()) {
+                    out_tokens.push(format!("{}_{}", v_ctrl, inst_name));
+                } else {
+                    out_tokens.push(v_ctrl.to_string());
+                }
+                for t in &tokens[4..] { out_tokens.push(t.to_string()); }
+            } else {
+                for t in &tokens[1..] { out_tokens.push(t.to_string()); }
+            }
+        }
+        'K' => {
+            if tokens.len() >= 4 {
+                let l1 = tokens[1];
+                let l2 = tokens[2];
+                if sub_elements.contains(&l1.to_ascii_uppercase()) {
+                    out_tokens.push(format!("{}_{}", l1, inst_name));
+                } else {
+                    out_tokens.push(l1.to_string());
+                }
+                if sub_elements.contains(&l2.to_ascii_uppercase()) {
+                    out_tokens.push(format!("{}_{}", l2, inst_name));
+                } else {
+                    out_tokens.push(l2.to_string());
+                }
+                for t in &tokens[3..] { out_tokens.push(t.to_string()); }
+            } else {
+                for t in &tokens[1..] { out_tokens.push(t.to_string()); }
+            }
+        }
+        'T' => {
+            for i in 1..=4.min(tokens.len() - 1) {
+                out_tokens.push(map_subckt_node(tokens[i], port_map, inst_name));
+            }
+            for t in &tokens[5..] { out_tokens.push(t.to_string()); }
+        }
+        'O' => {
+            if tokens.len() >= 5 {
+                for i in 1..=4 {
+                    out_tokens.push(map_subckt_node(tokens[i], port_map, inst_name));
+                }
+                for t in &tokens[5..] { out_tokens.push(t.to_string()); }
+            } else if tokens.len() == 4 {
+                for i in 1..=3 {
+                    out_tokens.push(map_subckt_node(tokens[i], port_map, inst_name));
+                }
+            } else {
+                for t in &tokens[1..] { out_tokens.push(t.to_string()); }
+            }
+        }
+        _ => {
+            for t in &tokens[1..] { out_tokens.push(t.to_string()); }
+        }
+    }
+    out_tokens.join(" ")
+}
+
+fn expand_instance(
+    inst_name: &str,
+    subckt_name: &str,
+    args: &[String],
+    subckts: &HashMap<String, SubcktDef>,
+    depth: usize,
+) -> Result<Vec<String>, String> {
+    if depth > 50 {
+        return Err("Maximum subcircuit recursion depth exceeded (circular subcircuit dependency?)".to_string());
+    }
+    let def = subckts.get(&subckt_name.to_ascii_uppercase())
+        .ok_or_else(|| format!("Unknown subcircuit '{}'", subckt_name))?;
+    if def.ports.len() != args.len() {
+        return Err(format!("Subcircuit '{}' expects {} ports, but got {} in instance '{}'", subckt_name, def.ports.len(), args.len(), inst_name));
+    }
+    let mut port_map = HashMap::new();
+    for (port, arg) in def.ports.iter().zip(args.iter()) {
+        port_map.insert(port.to_ascii_uppercase(), arg.clone());
+    }
+
+    let mut sub_elements = HashSet::new();
+    for line in &def.lines {
+        let t = line.trim();
+        if !t.is_empty() && !t.starts_with('*') && !t.starts_with('.') {
+            if let Some(first) = t.split_whitespace().next() {
+                sub_elements.insert(first.to_ascii_uppercase());
+            }
+        }
+    }
+
+    let mut result_lines = Vec::new();
+    for line in &def.lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('*') {
+            continue;
+        }
+        if trimmed.starts_with('.') {
+            result_lines.push(trimmed.to_string());
+            continue;
+        }
+        let tokens: Vec<&str> = trimmed.split(|c: char| c.is_whitespace() || c == ',').filter(|s| !s.is_empty()).collect();
+        if tokens.is_empty() {
+            continue;
+        }
+        let first_char = tokens[0].chars().next().unwrap().to_ascii_uppercase();
+        if first_char == 'X' {
+            let nested_inst = format!("{}_{}", tokens[0], inst_name);
+            let nested_sub = tokens.last().unwrap();
+            let nested_args: Vec<String> = tokens[1..tokens.len()-1].iter().map(|t| map_subckt_node(t, &port_map, inst_name)).collect();
+            let expanded = expand_instance(&nested_inst, nested_sub, &nested_args, subckts, depth + 1)?;
+            result_lines.extend(expanded);
+            continue;
+        }
+
+        let new_name = format!("{}_{}", tokens[0], inst_name);
+        let rewritten = rewrite_subckt_element(&tokens, &new_name, &port_map, inst_name, &sub_elements);
+        result_lines.push(rewritten);
+    }
+    Ok(result_lines)
+}
+
+pub fn expand_subcircuits(input: &str) -> Result<String, String> {
+    if !input.lines().any(|l| l.trim().to_ascii_lowercase().starts_with(".subckt")) {
+        return Ok(input.to_string());
+    }
+
+    let mut subckts: HashMap<String, SubcktDef> = HashMap::new();
+    let mut current_subckt: Option<(String, SubcktDef)> = None;
+    let mut top_lines: Vec<String> = Vec::new();
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with(".subckt") {
+            if current_subckt.is_some() {
+                return Err("Nested .subckt definitions are not supported (define them consecutively)".to_string());
+            }
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            if tokens.len() < 2 {
+                return Err(format!("Invalid .subckt directive: '{}'", trimmed));
+            }
+            let name = tokens[1].to_ascii_uppercase();
+            let ports: Vec<String> = tokens[2..].iter().map(|s| s.to_string()).collect();
+            current_subckt = Some((name, SubcktDef { ports, lines: Vec::new() }));
+        } else if lower.starts_with(".ends") {
+            if let Some((name, def)) = current_subckt.take() {
+                subckts.insert(name, def);
+            } else {
+                return Err(format!("Unexpected .ends without matching .subckt: '{}'", trimmed));
+            }
+        } else if let Some((_, ref mut def)) = current_subckt {
+            def.lines.push(line.to_string());
+        } else {
+            top_lines.push(line.to_string());
+        }
+    }
+
+    if current_subckt.is_some() {
+        return Err("Unclosed .subckt block (missing .ends)".to_string());
+    }
+
+    let mut final_lines = Vec::new();
+    for line in top_lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('.') {
+            final_lines.push(line);
+            continue;
+        }
+        let tokens: Vec<&str> = trimmed.split(|c: char| c.is_whitespace() || c == ',').filter(|s| !s.is_empty()).collect();
+        if tokens.is_empty() {
+            final_lines.push(line);
+            continue;
+        }
+        let first_char = tokens[0].chars().next().unwrap().to_ascii_uppercase();
+        if first_char == 'X' {
+            let inst_name = tokens[0];
+            let sub_name = tokens.last().unwrap();
+            let args: Vec<String> = tokens[1..tokens.len()-1].iter().map(|s| s.to_string()).collect();
+            let expanded = expand_instance(inst_name, sub_name, &args, &subckts, 0)?;
+            final_lines.extend(expanded);
+        } else {
+            final_lines.push(line);
+        }
+    }
+
+    Ok(final_lines.join("\n"))
+}
+
 pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
+    let expanded = expand_subcircuits(input)?;
     let mut components = Vec::new();
     let mut analyses = Vec::new();
     let mut method = IntegrationMethod::Trapezoidal;
+    let mut uic = false;
+    let mut initial_node_voltages = HashMap::new();
     let mut models: HashMap<String, ModelCard> = HashMap::new();
     let mut pending: Vec<PendingDevice> = Vec::new();
     let mut pending_couplings: Vec<PendingCoupling> = Vec::new();
 
     // .model cards may come after the devices that use them.
-    let model_names: HashSet<String> = input
+    let model_names: HashSet<String> = expanded
         .lines()
         .filter_map(|l| {
             let mut w = l.split_whitespace();
@@ -363,7 +681,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
         })
         .collect();
     let mut first_content_line = true;
-    for line in input.lines() {
+    for line in expanded.lines() {
         let line_trimmed = line.trim();
         if line_trimmed.is_empty() {
             continue;
@@ -393,7 +711,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                     let (name, card) = parse_model_card(trimmed)?;
                     models.insert(name, card);
                 } else {
-                    parse_directive(trimmed, &mut analyses, &mut method)?;
+                    parse_directive(trimmed, &mut analyses, &mut method, &mut uic, &mut initial_node_voltages)?;
                 }
                 continue;
             }
@@ -434,6 +752,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                     original_line: trimmed.to_string(),
                     source: None,
                     extra_nodes: nodes[2..].to_vec(),
+                    initial_condition: None,
                 });
                 continue;
             }
@@ -466,6 +785,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                     original_line: trimmed.to_string(),
                     source: None,
                     extra_nodes: Vec::new(),
+                    initial_condition: None,
                 });
                 continue;
             }
@@ -482,6 +802,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                     original_line: trimmed.to_string(),
                     source: None,
                     extra_nodes: Vec::new(),
+                    initial_condition: None,
                 });
                 continue;
             }
@@ -509,6 +830,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                     original_line: trimmed.to_string(),
                     source: None,
                     extra_nodes: vec![nc1, nc2],
+                    initial_condition: None,
                 });
                 continue;
             }
@@ -530,6 +852,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                     original_line: trimmed.to_string(),
                     source: None,
                     extra_nodes: vec![nc1, nc2],
+                    initial_condition: None,
                 });
                 continue;
             }
@@ -549,6 +872,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                         original_line: trimmed.to_string(),
                         source: None,
                         extra_nodes: vec![nc1, nc2],
+                        initial_condition: None,
                     });
                     continue;
                 } else if tokens.len() >= 5 {
@@ -564,6 +888,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                         original_line: trimmed.to_string(),
                         source: None,
                         extra_nodes: vec![],
+                        initial_condition: None,
                     });
                     continue;
                 } else {
@@ -586,6 +911,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                         original_line: trimmed.to_string(),
                         source: None,
                         extra_nodes: vec![nc1, nc2],
+                        initial_condition: None,
                     });
                     continue;
                 } else if tokens.len() >= 5 {
@@ -601,6 +927,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                         original_line: trimmed.to_string(),
                         source: None,
                         extra_nodes: vec![],
+                        initial_condition: None,
                     });
                     continue;
                 } else {
@@ -633,6 +960,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                     original_line: trimmed.to_string(),
                     source: None,
                     extra_nodes: vec![nc1, nc2],
+                    initial_condition: None,
                 });
                 continue;
             }
@@ -670,6 +998,46 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                     original_line: trimmed.to_string(),
                     source: None,
                     extra_nodes: vec![ns1, ns2],
+                    initial_condition: None,
+                });
+                continue;
+            }
+
+            if first_char == 'S' {
+                if tokens.len() < 5 {
+                    return Err(format!("'{}' needs switch name, two switch terminals, and two control terminals, e.g. S1 1 2 3 4.", trimmed));
+                }
+                let n1 = normalize_node(tokens[1]);
+                let n2 = normalize_node(tokens[2]);
+                let nc1 = normalize_node(tokens[3]);
+                let nc2 = normalize_node(tokens[4]);
+                let mut ron = 1.0;
+                let mut roff = 1e6;
+                let mut vt = 0.0;
+                for tok in &tokens[5..] {
+                    let tok_lower = tok.to_ascii_lowercase();
+                    if let Some((k, v)) = tok_lower.split_once('=') {
+                        match k {
+                            "ron" => if let Ok(val) = parse_eng_value(v) { ron = val; },
+                            "roff" => if let Ok(val) = parse_eng_value(v) { roff = val; },
+                            "vt" => if let Ok(val) = parse_eng_value(v) { vt = val; },
+                            _ => {}
+                        }
+                    } else if let Ok(val) = parse_eng_value(tok) {
+                        if ron == 1.0 { ron = val; }
+                        else if roff == 1e6 { roff = val; }
+                        else { vt = val; }
+                    }
+                }
+                components.push(Component {
+                    name,
+                    comp_type: ComponentType::Switch { ron, roff, vt },
+                    node1: n1,
+                    node2: n2,
+                    original_line: trimmed.to_string(),
+                    source: None,
+                    extra_nodes: vec![nc1, nc2],
+                    initial_condition: None,
                 });
                 continue;
             }
@@ -716,19 +1084,33 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                     match unsupported_element_kind(other) {
                         Some(kind) => {
                             return Err(format!(
-                                "'{}' is a {} ({}), which this engine does not simulate yet. Supported elements: R, C, L, V, I, D, Q, M, E, G, F, H, O, T, K, W.",
+                                "'{}' is a {} ({}), which this engine does not simulate yet. Supported elements: R, C, L, V, I, D, Q, M, E, G, F, H, O, T, K, W, S, X.",
                                 trimmed, kind, other
                             ))
                         }
                         None => {
                             return Err(format!(
-                                "'{}': unknown element '{}'. Supported elements: R, C, L, V, I, D, Q, M, E, G, F, H, O, T, K, W.",
+                                "'{}': unknown element '{}'. Supported elements: R, C, L, V, I, D, Q, M, E, G, F, H, O, T, K, W, S, X.",
                                 trimmed, name
                             ))
                         }
                     }
                 }
             };
+
+            let mut initial_condition = None;
+            if first_char == 'C' || first_char == 'L' {
+                let cleaned = trimmed.replace(" = ", "=").replace(" =", "=").replace("= ", "=");
+                for tok in cleaned.split_whitespace().skip(4) {
+                    if let Some((k, v)) = tok.split_once('=') {
+                        if k.eq_ignore_ascii_case("ic") {
+                            if let Ok(v_ic) = parse_eng_value(v) {
+                                initial_condition = Some(v_ic);
+                            }
+                        }
+                    }
+                }
+            }
 
             components.push(Component {
                 name,
@@ -738,6 +1120,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
                 original_line: trimmed.to_string(),
                 source,
                 extra_nodes: Vec::new(),
+                initial_condition,
             });
         }
     }
@@ -811,6 +1194,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
             ComponentType::Ccvs { r_val, .. } => r_val,
             ComponentType::OpAmp { gain } => gain.unwrap_or(1e6),
             ComponentType::Transformer { l1, l2, m } => l1 * l2 * m,
+            ComponentType::Switch { ron, .. } => ron,
         };
         if !value.is_finite() {
             return Err(format!("Element {} has a non-finite value in '{}'.", c.name, c.original_line));
@@ -944,5 +1328,7 @@ pub fn parse_netlist(input: &str) -> Result<Circuit, String> {
         analyses,
         method,
         mutual_couplings,
+        uic,
+        initial_node_voltages,
     })
 }

@@ -40,11 +40,19 @@ pub enum ComponentType {
     OpAmp { gain: Option<f64> },
     /// Transformer with primary node1, node2 and secondary extra[0], extra[1].
     Transformer { l1: f64, l2: f64, m: f64 },
+    /// Voltage-controlled switch: output node1, node2; control extra_nodes[0] (+), extra_nodes[1] (-).
+    Switch { ron: f64, roff: f64, vt: f64 },
 }
 
 impl ComponentType {
     pub fn is_nonlinear(&self) -> bool {
-        matches!(self, ComponentType::Diode { .. } | ComponentType::Bjt { .. } | ComponentType::Mosfet { .. })
+        matches!(
+            self,
+            ComponentType::Diode { .. }
+                | ComponentType::Bjt { .. }
+                | ComponentType::Mosfet { .. }
+                | ComponentType::Switch { .. }
+        )
     }
 }
 
@@ -77,6 +85,7 @@ pub enum SweepType {
 pub enum IntegrationMethod {
     BackwardEuler,
     Trapezoidal,
+    Gear,
 }
 
 /// Analyses requested by SPICE control cards. `.op` is always run.
@@ -87,6 +96,12 @@ pub enum Analysis {
     Tran { tstep: f64, tstop: f64, tstart: f64, tmax: Option<f64> },
     /// `.dc SRC start stop step`: sweep a V or I source's DC value.
     Dc { source: String, start: f64, stop: f64, step: f64 },
+    /// `.mor order [output_node]`: Model Order Reduction via moments, Arnoldi and PRIMA.
+    Mor { order: usize, output_node: Option<String> },
+    /// `.tf V(out) V(in)`: Small-signal DC transfer function, input & output resistance.
+    Tf { out_var: String, in_src: String },
+    /// `.meas [tran|ac] name metric var`: SPICE measurement.
+    Measure { target_analysis: String, name: String, metric: String, variable: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +119,9 @@ pub struct Component {
     /// Terminals beyond the first two (transistor emitter / source).
     #[serde(default)]
     pub extra_nodes: Vec<String>,
+    /// Initial condition (V for capacitor, I for inductor) for transient UIC.
+    #[serde(default)]
+    pub initial_condition: Option<f64>,
 }
 
 impl Component {
@@ -175,6 +193,12 @@ pub struct Circuit {
     pub method: IntegrationMethod,
     #[serde(default)]
     pub mutual_couplings: Vec<MutualCoupling>,
+    /// True if transient analysis should use initial conditions instead of DC operating point.
+    #[serde(default)]
+    pub uic: bool,
+    /// Initial node voltages specified via .ic
+    #[serde(default)]
+    pub initial_node_voltages: HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +338,15 @@ pub struct SimulationResult {
     pub device_ops: Vec<crate::nonlinear::DeviceOp>,
     #[serde(default)]
     pub dc_sweep: Option<crate::nonlinear::DcSweepResult>,
+    /// Model Order Reduction (PRIMA, Arnoldi, moments, Elmore delay)
+    #[serde(default)]
+    pub mor: Option<crate::mor::MorResult>,
+    /// Small-signal DC transfer function, Rin, Rout
+    #[serde(default)]
+    pub tf: Option<crate::dynamics::TfResult>,
+    /// SPICE measurement evaluations (.meas)
+    #[serde(default)]
+    pub measurements: Vec<crate::dynamics::MeasResult>,
 }
 
 impl Waveform {

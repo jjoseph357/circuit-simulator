@@ -4,6 +4,7 @@ pub mod mna;
 pub mod solvers;
 pub mod linter;
 pub mod dynamics;
+pub mod mor;
 pub mod nonlinear;
 pub mod optimizer;
 pub mod timing;
@@ -205,6 +206,9 @@ fn failed_result(solver_used: &str, error: String, diagnostics: Vec<Diagnostic>,
         newton: None,
         device_ops: Vec::new(),
         dc_sweep: None,
+        mor: None,
+        tf: None,
+        measurements: Vec::new(),
     }
 }
 
@@ -442,10 +446,12 @@ pub fn simulate_parsed(circuit: models::Circuit, solver: SolverKind, start_time:
         Vec::new()
     };
 
-    // 8. Further analyses requested by .ac / .tran / .dc control cards
+    // 8. Further analyses requested by .ac / .tran / .dc / .mor / .tf control cards
     let mut ac = None;
     let mut transient = None;
     let mut dc_sweep = None;
+    let mut mor = None;
+    let mut tf = None;
     let mut analysis_errors = Vec::new();
     for analysis in &circuit.analyses {
         match analysis {
@@ -459,7 +465,7 @@ pub fn simulate_parsed(circuit: models::Circuit, solver: SolverKind, start_time:
                 }
             }
             Analysis::Tran { tstep, tstop, tstart, tmax } => {
-                let settings = dynamics::TransientSettings { tstep: *tstep, tstop: *tstop, tstart: *tstart, tmax: *tmax, method: circuit.method };
+                let settings = dynamics::TransientSettings { tstep: *tstep, tstop: *tstop, tstart: *tstart, tmax: *tmax, method: circuit.method, uic: circuit.uic };
                 match dynamics::transient_analysis(&circuit, &mna, &settings) {
                     Ok(r) => transient = Some(r),
                     Err(e) => analysis_errors.push(e),
@@ -469,8 +475,23 @@ pub fn simulate_parsed(circuit: models::Circuit, solver: SolverKind, start_time:
                 Ok(r) => dc_sweep = Some(r),
                 Err(e) => analysis_errors.push(e),
             },
+            Analysis::Mor { order, output_node } => {
+                match mor::mor_analysis(&circuit, &mna, *order, output_node.as_deref()) {
+                    Ok(r) => mor = Some(r),
+                    Err(e) => analysis_errors.push(e),
+                }
+            }
+            Analysis::Tf { out_var, in_src } => {
+                let g_tf = if has_devices { nonlinear::small_signal_matrix(&circuit, &mna.matrix, &solution_vector) } else { mna.matrix.clone() };
+                match dynamics::tf_analysis(&circuit, &mna, &g_tf, out_var, in_src) {
+                    Ok(r) => tf = Some(r),
+                    Err(e) => analysis_errors.push(e),
+                }
+            }
+            Analysis::Measure { .. } => {}
         }
     }
+    let measurements = dynamics::evaluate_measurements(&circuit, transient.as_ref(), ac.as_ref(), dc_sweep.as_ref());
 
     // 9. Generate physical storybook explanation
     let storybook_explanation = generate_storybook_explanation(&circuit, &node_voltages, &branch_currents, &branch_powers, &device_ops);
@@ -505,6 +526,9 @@ pub fn simulate_parsed(circuit: models::Circuit, solver: SolverKind, start_time:
         newton,
         device_ops,
         dc_sweep,
+        mor,
+        tf,
+        measurements,
     }
 }
 

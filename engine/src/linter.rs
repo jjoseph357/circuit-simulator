@@ -128,6 +128,7 @@ fn conducts_dc(t: &ComponentType) -> bool {
             | ComponentType::Ccvs { .. }
             | ComponentType::OpAmp { .. }
             | ComponentType::Transformer { .. }
+            | ComponentType::Switch { .. }
     ) || t.is_nonlinear()
 }
 

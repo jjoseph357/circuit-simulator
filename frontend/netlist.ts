@@ -359,9 +359,13 @@ export function explainLine(raw: string, isFirstLine = false, models: Map<string
       text = `.tran runs a transient analysis: simulate the circuit over time from 0 to ${w[2] ?? '?'} s, reporting every ${w[1] ?? '?'} s.`;
       if (w.length < 3 || parseEngValue(w[1]) === null || parseEngValue(w[2]) === null) error = 'Write it as .tran <step> <stop time>, e.g. .tran 10u 5m';
     } else if (card === '.ac') {
-      text = `.ac sweeps the input frequency from ${w[3] ?? '?'} Hz to ${w[4] ?? '?'} Hz (${w[2] ?? '?'} points per ${w[1] === 'lin' ? 'sweep' : w[1] === 'oct' ? 'octave' : 'decade'}) to draw a Bode plot.`;
-      if (w.length < 5 || !/^(dec|oct|lin)$/i.test(w[1])) error = 'Write it as .ac dec <points> <start> <stop>, e.g. .ac dec 20 10 100k';
-      if (w[1]) roles.set(words[1].start, 'keyword');
+      if (w.length === 2 && parseEngValue(w[1]) !== null) {
+        text = `.ac simulates single-frequency phasor response at ${w[1]} Hz.`;
+      } else {
+        text = `.ac sweeps the input frequency from ${w[3] ?? '?'} Hz to ${w[4] ?? '?'} Hz (${w[2] ?? '?'} points per ${w[1] === 'lin' ? 'sweep' : w[1] === 'oct' ? 'octave' : 'decade'}) to draw a Bode plot.`;
+        if (w.length < 5 || !/^(dec|oct|lin)$/i.test(w[1])) error = 'Write it as .ac dec <points> <start> <stop>, e.g. .ac dec 20 10 100k';
+        if (w[1]) roles.set(words[1].start, 'keyword');
+      }
     } else if (card === '.dc') {
       text = `.dc sweeps source ${w[1] ?? '?'} from ${w[2] ?? '?'} to ${w[3] ?? '?'} in steps of ${w[4] ?? '?'}, solving the circuit at each value.`;
       if (w.length < 5) error = 'Write it as .dc <source> <start> <stop> <step>, e.g. .dc V1 0 5 0.1';
@@ -370,7 +374,21 @@ export function explainLine(raw: string, isFirstLine = false, models: Map<string
       text = `.model defines device parameters named ${w[1] ?? '?'} (type ${w[2] ?? '?'}), used by diodes and transistors.`;
       if (words[1]) roles.set(words[1].start, 'model');
       if (words[2]) roles.set(words[2].start, 'keyword');
-    } else if (card === '.options' || card === '.option') text = '.options changes simulator settings, e.g. method=trap or method=euler for transient runs.';
+    } else if (card === '.options' || card === '.option') {
+      text = '.options changes simulator settings, e.g. method=trap, method=euler, or method=gear.';
+    } else if (card === '.mor') {
+      text = `.mor performs Model Order Reduction (moments, Arnoldi, and PRIMA) to order ${w[1] ?? '4'}.`;
+    } else if (card === '.tf') {
+      text = `.tf calculates DC small-signal transfer function for output ${w[1] ?? '?'} from source ${w[2] ?? '?'}.`;
+    } else if (card === '.meas' || card === '.measure') {
+      text = `.meas evaluates SPICE measurement ${w[1] ?? '?'} (${w[2] ?? '?'} on ${w[3] ?? '?'}).`;
+    } else if (card === '.ic') {
+      text = '.ic defines initial node voltages for transient UIC simulation.';
+    } else if (card === '.subckt') {
+      text = `.subckt defines subcircuit ${w[1] ?? '?'} with ports ${w.slice(2).join(' ')}.`;
+    } else if (card === '.ends') {
+      text = '.ends closes subcircuit definition.';
+    }
     for (const t of words.slice(1)) if (!roles.has(t.start) && parseEngValue(t.text) !== null) roles.set(t.start, 'value');
     return { text, error, tokens: mark(roles) };
   }

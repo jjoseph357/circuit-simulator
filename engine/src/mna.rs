@@ -411,6 +411,7 @@ pub fn build_mna_system(circuit: &Circuit) -> MnaSystem {
                     aux1 + 1, aux2 + 1
                 );
             }
+            ComponentType::Switch { .. } => unreachable!("Switch is nonlinear and handled in Newton-Raphson"),
         }
 
         if educational {
@@ -707,6 +708,7 @@ pub fn generate_kcl_equations(
                         }
                     }
                 }
+                _ => {}
             }
         }
 

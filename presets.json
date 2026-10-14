@@ -309,5 +309,17 @@
       "2": 6.0,
       "3": 6.0
     }
+  },
+  {
+    "id": "ee898_doc23_phasor",
+    "title": "EE 898 Phasor Analysis (50 Hz series RLC)",
+    "description": "Prof. Behzad Nouri's Doc 23 phasor problem: 50 Hz AC source (40 V peak), R = 4 Ω, L = 12.732 mH (XL = 4 Ω), C = 800 µF (XC = 3.98 Ω). The total impedance is |Z| ≈ 4 Ω, drawing |I| ≈ 10 A.",
+    "netlist": "* EE 898 Doc 23 50Hz Phasor Analysis\nV1 1 0 DC 0 AC 40 0\nR1 1 2 4\nL1 2 3 12.7324m\nC1 3 0 800u\n.ac 50\n.end\n",
+    "expected_voltages": {
+      "0": 0.0,
+      "1": 0.0,
+      "2": 0.0,
+      "3": 0.0
+    }
   }
 ]

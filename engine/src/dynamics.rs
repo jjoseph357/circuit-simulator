@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::mna::{ac_rhs, source_rhs, MnaSystem};
 use crate::models::{Circuit, ComponentType, IntegrationMethod, SweepType};
+use crate::nonlinear::DcSweepResult;
 use crate::solvers::sparse_lu::{CsrMatrix, SparseLuFactors};
 
 const MAX_AC_POINTS: usize = 10_000;
@@ -47,6 +48,24 @@ pub struct TransientResult {
     /// (e.g. Q1:0 collector, Q1:1 base, Q1:2 emitter), so the schematic can replay them.
     #[serde(default)]
     pub terminal_currents: HashMap<String, Vec<f64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TfResult {
+    pub output_variable: String,
+    pub input_source: String,
+    pub transfer_function: f64,
+    pub input_resistance: f64,
+    pub output_resistance: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeasResult {
+    pub name: String,
+    pub analysis: String,
+    pub metric: String,
+    pub variable: String,
+    pub value: f64,
 }
 
 // ---------------------------------------------------------------- AC
@@ -149,6 +168,7 @@ pub struct TransientSettings {
     pub tstart: f64,
     pub tmax: Option<f64>,
     pub method: IntegrationMethod,
+    pub uic: bool,
 }
 
 /// Element currents (node1 → node2) at one accepted time point.
@@ -156,9 +176,12 @@ fn element_currents(
     circuit: &Circuit,
     x: &[f64],
     x_prev: &[f64],
+    x_prev2: Option<&[f64]>,
     t: f64,
     h: f64,
     used_be: bool,
+    used_gear: bool,
+    gear_r: f64,
     cap_current: &mut HashMap<String, f64>,
     device_ops: &[crate::nonlinear::DeviceOp],
 ) -> Vec<(String, f64)> {
@@ -197,15 +220,36 @@ fn element_currents(
                     None => i_val,
                 },
                 ComponentType::Capacitor { c_val } => {
-                    let dv = (v(&c.node1) - v(&c.node2)) - (v_prev(&c.node1) - v_prev(&c.node2));
+                    let vc = v(&c.node1) - v(&c.node2);
+                    let vc_prev = v_prev(&c.node1) - v_prev(&c.node2);
+                    let dv = vc - vc_prev;
                     // Same discretization the solver used, so KCL holds exactly at each step.
                     let i = if used_be {
                         c_val * dv / h
+                    } else if used_gear {
+                        let vc_prev2 = if let Some(xp2) = x_prev2 {
+                            let idx1 = circuit.node_to_idx[&c.node1];
+                            let idx2 = circuit.node_to_idx[&c.node2];
+                            let v1 = if idx1 == 0 { 0.0 } else { xp2[idx1 - 1] };
+                            let v2 = if idx2 == 0 { 0.0 } else { xp2[idx2 - 1] };
+                            v1 - v2
+                        } else {
+                            vc_prev
+                        };
+                        let alpha0 = (2.0 * gear_r + 1.0) / (gear_r + 1.0) / h;
+                        let alpha1 = -(gear_r + 1.0) / h;
+                        let alpha2 = (gear_r * gear_r) / ((gear_r + 1.0) * h);
+                        c_val * (alpha0 * vc + alpha1 * vc_prev + alpha2 * vc_prev2)
                     } else {
                         2.0 * c_val * dv / h - cap_current.get(&c.name).copied().unwrap_or(0.0)
                     };
                     cap_current.insert(c.name.clone(), i);
                     i
+                }
+                ComponentType::Switch { ron, roff, vt } => {
+                    let vc = if c.extra_nodes.len() >= 2 { v(&c.extra_nodes[0]) - v(&c.extra_nodes[1]) } else { 0.0 };
+                    let r = if vc >= vt { ron } else { roff };
+                    (v(&c.node1) - v(&c.node2)) / r
                 }
                 _ => device_ops.iter().find(|o| o.name == c.name).and_then(|o| o.terminals.first()).map(|t| t.current).unwrap_or(0.0),
             };
@@ -246,16 +290,50 @@ pub fn transient_analysis(circuit: &Circuit, mna: &MnaSystem, s: &TransientSetti
     }
     let companion = |alpha: f64| CsrMatrix::from_sorted_triplets(n, pattern.iter().map(|&(k, gv, cv)| (k, gv + alpha * cv)));
 
-    // Initial condition: DC operating point with sources at their t = 0 values.
+    // Initial condition: DC operating point with sources at their t = 0 values, or UIC if requested.
     let b0 = source_rhs(circuit, Some(0.0));
     let nonlinear = circuit.components.iter().any(|c| c.comp_type.is_nonlinear());
     let ops_at = |x: &[f64]| if nonlinear { crate::nonlinear::device_ops_at(circuit, x) } else { Vec::new() };
-    let x0 = if nonlinear {
+    let x0 = if s.uic || circuit.uic {
+        let mut init_x = vec![0.0; n];
+        for (node, &v) in &circuit.initial_node_voltages {
+            if let Some(&k) = circuit.node_to_idx.get(node) {
+                if k > 0 {
+                    init_x[k - 1] = v;
+                }
+            }
+        }
+        for comp in &circuit.components {
+            if let Some(ic) = comp.initial_condition {
+                match comp.comp_type {
+                    ComponentType::Capacitor { .. } => {
+                        let k1 = *circuit.node_to_idx.get(&comp.node1).unwrap_or(&0);
+                        let k2 = *circuit.node_to_idx.get(&comp.node2).unwrap_or(&0);
+                        if k1 > 0 && k2 == 0 {
+                            init_x[k1 - 1] = ic;
+                        } else if k1 == 0 && k2 > 0 {
+                            init_x[k2 - 1] = -ic;
+                        } else if k1 > 0 && k2 > 0 {
+                            init_x[k1 - 1] = init_x[k2 - 1] + ic;
+                        }
+                    }
+                    ComponentType::Inductor { .. } => {
+                        if let Some(&aux) = circuit.aux_index.get(&comp.name) {
+                            init_x[aux] = ic;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        init_x
+    } else if nonlinear {
         crate::nonlinear::solve_nonlinear(circuit, g, &b0, None, false).map(|(x, _)| x)
+            .map_err(|e| format!("Transient initial operating point failed: {}", e))?
     } else {
         SparseLuFactors::factor(g).and_then(|lu| lu.solve(&b0))
-    }
-    .map_err(|e| format!("Transient initial operating point failed: {}", e))?;
+            .map_err(|e| format!("Transient initial operating point failed: {}", e))?
+    };
 
     let state_vars: Vec<usize> = (0..n).filter(|&i| cm.get(i, i) != 0.0).collect();
     let dynamic_row: Vec<bool> = (0..n).map(|i| cm.row(i).next().is_some()).collect();
@@ -284,7 +362,7 @@ pub fn transient_analysis(circuit: &Circuit, mna: &MnaSystem, s: &TransientSetti
     if store_currents {
         let ops0 = ops_at(&x0);
         terminals.push(terminal_row(&ops0));
-        currents.push(element_currents(circuit, &x0, &x0, 0.0, 1.0, true, &mut HashMap::new(), &ops0));
+        currents.push(element_currents(circuit, &x0, &x0, None, 0.0, 1.0, true, false, 1.0, &mut HashMap::new(), &ops0));
     }
     let mut step_sizes = vec![0.0];
 
@@ -309,8 +387,17 @@ pub fn transient_analysis(circuit: &Circuit, mna: &MnaSystem, s: &TransientSetti
         h = h.min(hmax).min(next_bp - t).max(hmin.min(next_bp - t));
         let lands_on_bp = (t + h - next_bp).abs() <= hmin;
 
+        let use_gear = s.method == IntegrationMethod::Gear && !after_breakpoint && prev.is_some();
         let use_be = after_breakpoint || s.method == IntegrationMethod::BackwardEuler;
-        let alpha = if use_be { 1.0 / h } else { 2.0 / h };
+        let (alpha, gear_r) = if use_be {
+            (1.0 / h, 1.0)
+        } else if use_gear {
+            let hp = prev.as_ref().unwrap().1;
+            let r = h / hp;
+            ((2.0 * r + 1.0) / (r + 1.0) / h, r)
+        } else {
+            (2.0 / h, 1.0)
+        };
         if !nonlinear && cached.as_ref().map(|(a, _)| *a != alpha).unwrap_or(true) {
             let lu = SparseLuFactors::factor(&companion(alpha)).map_err(|e| format!("Transient step at t = {:.3e} s failed: {}", t, e))?;
             factorizations += 1;
@@ -323,6 +410,20 @@ pub fn transient_analysis(circuit: &Circuit, mna: &MnaSystem, s: &TransientSetti
         let rhs: Vec<f64> = if use_be {
             // (G + C/h)·x₁ = b₁ + (C/h)·x₀
             (0..n).map(|i| b_next[i] + alpha * cx[i]).collect()
+        } else if use_gear {
+            let xp = &prev.as_ref().unwrap().0;
+            let cx_prev = cm.matvec(xp);
+            let c1 = (gear_r + 1.0) / h;
+            let c2 = (gear_r * gear_r) / ((gear_r + 1.0) * h);
+            (0..n)
+                .map(|i| {
+                    if dynamic_row[i] {
+                        b_next[i] + c1 * cx[i] - c2 * cx_prev[i]
+                    } else {
+                        b_next[i]
+                    }
+                })
+                .collect()
         } else {
             // Rows with reactive elements: (G + 2C/h)·x₁ + i(x₁) = b₁ + (2C/h)·x₀ + [b₀ − G·x₀ − i(x₀)],
             // where the bracket is C·dx/dt at t₀. Purely resistive rows (no C entry) are solved
@@ -374,7 +475,7 @@ pub fn transient_analysis(circuit: &Circuit, mna: &MnaSystem, s: &TransientSetti
         if store_currents {
             let ops = ops_at(&x_next);
             terminals.push(terminal_row(&ops));
-            currents.push(element_currents(circuit, &x_next, &x, t_next, t_next - t, use_be, &mut cap_current, &ops));
+            currents.push(element_currents(circuit, &x_next, &x, prev.as_ref().map(|p| p.0.as_slice()), t_next, t_next - t, use_be, use_gear, gear_r, &mut cap_current, &ops));
         }
         step_sizes.push(t_next - t);
         prev = Some((std::mem::replace(&mut x, x_next), t_next - t));
@@ -452,4 +553,156 @@ pub fn transient_analysis(circuit: &Circuit, mna: &MnaSystem, s: &TransientSetti
         decimated,
         terminal_currents,
     })
+}
+
+// ---------------------------------------------------------------- Transfer Function (.tf)
+
+pub fn tf_analysis(circuit: &Circuit, mna: &MnaSystem, g_matrix: &CsrMatrix, out_var: &str, in_src: &str) -> Result<TfResult, String> {
+    let aux_in = circuit
+        .aux_index
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(in_src))
+        .map(|(_, &idx)| idx)
+        .ok_or_else(|| format!("Transfer function input source '{}' not found (must be a voltage source)", in_src))?;
+
+    let lu_g = SparseLuFactors::factor(g_matrix)
+        .map_err(|e| format!("TF failed to factorize G: {}", e))?;
+
+    // Differentiate G x = b with respect to Vin
+    let mut rhs_in = vec![0.0; mna.dimension];
+    rhs_in[aux_in] = 1.0;
+    let dx_dvin = lu_g.solve(&rhs_in)
+        .map_err(|e| format!("TF failed to solve for sensitivity: {}", e))?;
+
+    // Parse output variable: e.g. "V(out)", "V(1)", or "out"
+    let clean_node = out_var.trim()
+        .trim_start_matches("V(")
+        .trim_start_matches("v(")
+        .trim_end_matches(')')
+        .trim();
+    let out_node_idx = circuit
+        .node_to_idx
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(clean_node))
+        .map(|(_, &idx)| idx)
+        .ok_or_else(|| format!("TF output node '{}' not found", clean_node))?;
+
+    let tf_gain = if out_node_idx > 0 { dx_dvin[out_node_idx - 1] } else { 0.0 };
+
+    // Input resistance Rin = dVin / |dIin|
+    let di_dvin = dx_dvin[aux_in].abs();
+    let rin = if di_dvin > 1e-18 { 1.0 / di_dvin } else { f64::INFINITY };
+
+    // Output resistance Rout: apply test current 1A at out_node with all sources killed
+    let rout = if out_node_idx > 0 {
+        let mut rhs_out = vec![0.0; mna.dimension];
+        rhs_out[out_node_idx - 1] = 1.0;
+        lu_g.solve(&rhs_out).map(|x| x[out_node_idx - 1].abs()).unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    Ok(TfResult {
+        output_variable: out_var.to_string(),
+        input_source: in_src.to_string(),
+        transfer_function: tf_gain,
+        input_resistance: rin,
+        output_resistance: rout,
+    })
+}
+
+// ---------------------------------------------------------------- Measurements (.meas)
+
+pub fn evaluate_measurements(
+    circuit: &Circuit,
+    transient: Option<&TransientResult>,
+    ac: Option<&AcResult>,
+    dc: Option<&DcSweepResult>,
+) -> Vec<MeasResult> {
+    let mut results = Vec::new();
+    for analysis in &circuit.analyses {
+        if let crate::models::Analysis::Measure { target_analysis, name, metric, variable } = analysis {
+            let metric_up = metric.to_ascii_uppercase();
+            let clean_var = variable.trim()
+                .trim_start_matches("V(")
+                .trim_start_matches("v(")
+                .trim_end_matches(')')
+                .trim();
+
+            if target_analysis.eq_ignore_ascii_case("tran") {
+                if let Some(tr) = transient {
+                    if let Some(waveform) = tr.node_voltages.get(clean_var) {
+                        if !waveform.is_empty() {
+                            let val = match metric_up.as_str() {
+                                "MAX" => waveform.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
+                                "MIN" => waveform.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+                                "PP" | "PKPK" => {
+                                    let mx = waveform.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                                    let mn = waveform.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                                    mx - mn
+                                }
+                                "AVG" => waveform.iter().sum::<f64>() / waveform.len() as f64,
+                                "RMS" => (waveform.iter().map(|v| v * v).sum::<f64>() / waveform.len() as f64).sqrt(),
+                                _ => 0.0,
+                            };
+                            results.push(MeasResult {
+                                name: name.clone(),
+                                analysis: "tran".to_string(),
+                                metric: metric.clone(),
+                                variable: variable.clone(),
+                                value: val,
+                            });
+                        }
+                    }
+                }
+            } else if target_analysis.eq_ignore_ascii_case("ac") {
+                if let Some(ac_res) = ac {
+                    if let Some(mags) = ac_res.node_magnitude.get(clean_var) {
+                        if !mags.is_empty() {
+                            let val = match metric_up.as_str() {
+                                "MAX" => mags.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
+                                "MIN" => mags.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+                                "AVG" => mags.iter().sum::<f64>() / mags.len() as f64,
+                                _ => mags[0],
+                            };
+                            results.push(MeasResult {
+                                name: name.clone(),
+                                analysis: "ac".to_string(),
+                                metric: metric.clone(),
+                                variable: variable.clone(),
+                                value: val,
+                            });
+                        }
+                    }
+                }
+            } else if target_analysis.eq_ignore_ascii_case("dc") {
+                if let Some(dc_res) = dc {
+                    if let Some(waveform) = dc_res.node_voltages.get(clean_var) {
+                        if !waveform.is_empty() {
+                            let val = match metric_up.as_str() {
+                                "MAX" => waveform.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
+                                "MIN" => waveform.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+                                "PP" | "PKPK" => {
+                                    let mx = waveform.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                                    let mn = waveform.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                                    mx - mn
+                                }
+                                "AVG" => waveform.iter().sum::<f64>() / waveform.len() as f64,
+                                "RMS" => (waveform.iter().map(|v| v * v).sum::<f64>() / waveform.len() as f64).sqrt(),
+                                _ => waveform[0],
+                            };
+                            results.push(MeasResult {
+                                name: name.clone(),
+                                analysis: "dc".to_string(),
+                                metric: metric.clone(),
+                                variable: variable.clone(),
+                                value: val,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    results
 }
